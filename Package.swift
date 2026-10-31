@@ -13,6 +13,6 @@ let package = Package(
         .target(name: "ParakeetRuntime", swiftSettings: [.swiftLanguageMode(.v5)]),
         .target(name: "BuilderHelmAudio", dependencies: ["ParakeetRuntime"]),
         .executableTarget(name: "bhaudio", dependencies: ["BuilderHelmAudio"]),
-        .testTarget(name: "BuilderHelmAudioTests", dependencies: ["BuilderHelmAudio"], resources: [.copy("Fixtures")]),
+        .testTarget(name: "BuilderHelmAudioTests", dependencies: ["BuilderHelmAudio", "ParakeetRuntime"], resources: [.copy("Fixtures")]),
     ]
 )

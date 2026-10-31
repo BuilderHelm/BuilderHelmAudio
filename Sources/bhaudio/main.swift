@@ -6,9 +6,9 @@ usage: bhaudio <command> [options]
 
   models                                   List models and whether they are downloaded
   download <model>                         Download and verify a model
-  transcribe <audio> [--model M] [--ctc] [--json]
+  transcribe <audio> [--model M] [--ctc] [--compute ane|gpu|cpu] [--json]
   spot <audio> <keyword>... [--model M] [--threshold T]
-  benchmark <cases.json> [--model M] [--ctc] [--rounds N] [--out results.json]
+  benchmark <cases.json> [--model M] [--ctc] [--compute ane|gpu|cpu] [--rounds N] [--out results.json]
 
 Models: \(AsrModel.all.map(\.id).joined(separator: ", ")) (default \(AsrModel.parakeetTdtCtc110M.id))
 benchmark cases: a JSON array of {"path": "...", "text": "reference (optional)"}
@@ -53,9 +53,19 @@ func progressPrinter(_ model: AsrModel) -> @Sendable (DownloadProgress) -> Void 
     }
 }
 
-func load(_ model: AsrModel, ctc: Bool) async throws -> SpeechRecognizer {
+@MainActor func computeUnits() -> ComputeUnits {
+    switch option("--compute") ?? "ane" {
+    case "ane": .neuralEngine
+    case "gpu": .gpu
+    case "cpu": .cpu
+    case let other: fail("Unknown compute units \(other); use ane, gpu or cpu")
+    }
+}
+
+func load(_ model: AsrModel, ctc: Bool, compute: ComputeUnits = .neuralEngine) async throws -> SpeechRecognizer {
     let started = Date()
-    let recognizer = try await SpeechRecognizer.load(model, mode: ctc ? .ctc : .tdt, progress: progressPrinter(model))
+    let recognizer = try await SpeechRecognizer.load(model, mode: ctc ? .ctc : .tdt, computeUnits: compute,
+                                                     progress: progressPrinter(model))
     FileHandle.standardError.write(Data(String(format: "Loaded %@ (%@ mode) in %.2f s\n", model.description,
                                                recognizer.mode == .ctc ? "CTC" : "TDT", Date().timeIntervalSince(started)).utf8))
     return recognizer
@@ -100,9 +110,9 @@ do {
         let directory = try await ModelStore.shared.download(model, progress: progressPrinter(model))
         print(directory.path)
     case "transcribe":
-        let model = model(), ctc = flag("--ctc"), asJSON = flag("--json")
+        let model = model(), ctc = flag("--ctc"), asJSON = flag("--json"), compute = computeUnits()
         guard let path = arguments.first else { fail(usage) }
-        let recognizer = try await load(model, ctc: ctc)
+        let recognizer = try await load(model, ctc: ctc, compute: compute)
         let transcript = try await recognizer.transcribe(file: URL(fileURLWithPath: path))
         if asJSON {
             print(json(["text": transcript.text, "ctc_text": transcript.ctcText, "duration": transcript.duration,
@@ -124,12 +134,12 @@ do {
         FileHandle.standardError.write(Data(String(format: "%d of %d found in %.3f s\n", hits.count, arguments.count - 1,
                                                    Date().timeIntervalSince(started)).utf8))
     case "benchmark":
-        let model = model(), ctc = flag("--ctc")
+        let model = model(), ctc = flag("--ctc"), compute = computeUnits()
         let rounds = Int(option("--rounds") ?? "3") ?? 3, out = option("--out")
         guard let path = arguments.first else { fail(usage) }
         struct Case: Decodable { let path: String; let text: String? }
         let cases = try JSONDecoder().decode([Case].self, from: Data(contentsOf: URL(fileURLWithPath: path)))
-        let recognizer = try await load(model, ctc: ctc)
+        let recognizer = try await load(model, ctc: ctc, compute: compute)
         for item in cases { _ = try await recognizer.transcribe(file: URL(fileURLWithPath: item.path)) }   // warm every window size
         var totals: [Double] = [], latencies: [Double] = [], texts: [String] = []
         var audio = 0.0

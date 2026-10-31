@@ -196,6 +196,13 @@ This initializer blocks while CoreML loads the model; call it off the main threa
 | `.checksumMismatch(file:)` | A downloaded file did not match its pinned SHA-256; it was discarded |
 | `.unsupportedAudio(_:)` | AVFoundation could not read the audio |
 | `.modelLoadFailed(_:)` | CoreML could not load the model |
+| `.unsupportedArchitecture(_:)` | No SDK adapter implements the model's runtime family |
+| `.unsupportedOperation(_:)` | The model/mode lacks a requested capability |
+| `.invalidModelConfiguration(_:)` | Metadata does not match the selected runtime |
+| `.invalidCtcConfiguration(_:)` | Invalid CTC layout, probability dimensions or vocabulary size |
+
+On the development branch, cancellation of an async load, download or transcription reports `CancellationError`.
+Synchronous CoreML work already running may finish before cancellation is observed.
 
 ---
 
@@ -209,6 +216,7 @@ This initializer blocks while CoreML loads the model; call it off the main threa
 | `transcribe(samples:includeCtcLogProbabilities:)` | Transcribe 16 kHz mono samples |
 | `spot(_:inFile:threshold:)` | Find keywords in an audio file |
 | `keywordSpotter.detect(_:in:threshold:)` | Find keywords in saved CTC probabilities |
+| `capabilities`, `keywordSpotterIfAvailable` | Check which outputs/operations the selected runtime supports (development branch) |
 | `SpeechRecognizer.loadAudio(_:)` | Read any supported file as 16 kHz mono samples |
 | `ModelStore.shared` | `download`, `isDownloaded`, `verify`, `remove`, `directory(for:)` |
 | `AsrModel.all`, `AsrModel.named(_:)` | List models, or look one up by id |
@@ -216,7 +224,8 @@ This initializer blocks while CoreML loads the model; call it off the main threa
 | `Transcript` | |
 |---|---|
 | `text` | TDT transcript (CTC on CTC-only models) |
-| `ctcText` | CTC transcript |
+| `ctcText` | CTC transcript, kept as a String for compatibility |
+| `ctcTranscript` | Optional CTC output; nil means the runtime has no CTC output (development branch) |
 | `tokens` | `[TimedToken]`: each token's text and time in seconds |
 | `duration`, `processingTime`, `realTimeFactor` | Audio length, processing time and speed |
 | `ctcLogProbabilities` | Per-frame CTC probabilities, when requested |
@@ -307,12 +316,16 @@ swift build -c release
 ### Test
 
 ```bash
-swift test                                   # unit tests
-BUILDERHELM_INTEGRATION=1 swift test         # also downloads both models and transcribes
-xcodebuild test -scheme BuilderHelmAudio-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
+swift test                                   # unit tests, no model downloads
+BUILDERHELM_INTEGRATION=1 swift test -c release --filter RealModelTests
+bash Scripts/ci-ios.sh                        # selects an installed compatible iPhone simulator
 ```
 
 The iOS Simulator has no Neural Engine, so its speed is not representative. For device numbers, use the [demo app](#demo-app).
+
+The development branch adds automatic macOS/iOS unit CI and a separate manual real-model integration workflow.
+See [runtime architecture and CI](Documentation/RuntimeArchitecture.md), [milestone 1 validation](Documentation/Milestone1Validation.md)
+and the [roadmap](ROADMAP.md). Real-model tests use pinned files; set `BUILDERHELM_TEST_COMPUTE=cpu` for CPU-only inference.
 
 ### Architecture
 
@@ -321,7 +334,9 @@ flowchart LR
     App[Your app] --> Recognizer[SpeechRecognizer]
     Recognizer --> Store[ModelStore]
     Store --> HF[(Hugging Face, pinned + SHA-256)]
-    Recognizer --> Runtime[ParakeetRuntime]
+    Recognizer --> Factory[Runtime selection from model metadata]
+    Factory --> Adapter[110M adapter]
+    Adapter --> Runtime[ParakeetRuntime]
     Runtime --> ANE[Encoder on the Neural Engine]
     Runtime --> CPU[TDT + CTC decoding on the CPU]
     Recognizer --> Spotter[KeywordSpotter]
@@ -329,7 +344,7 @@ flowchart LR
 
 | Target | Responsibility |
 |---|---|
-| `BuilderHelmAudio` | Public API: `SpeechRecognizer`, `ModelStore`, `KeywordSpotter`, `AsrModel` |
+| `BuilderHelmAudio` | Public API, model capabilities, internal runtime selection and adapters |
 | `ParakeetRuntime` | CoreML + Accelerate Parakeet runtime, shared with the BuilderHelm model repositories |
 | `bhaudio` | Command-line tool for macOS |
 | `BuilderHelmAudioTests` | Unit, download and long-audio pipeline tests |
@@ -355,7 +370,9 @@ BuilderHelmAudio/
 
 ## Status
 
-Version 0.1.1. Tested on an Apple M5 Mac (macOS 27.2) and an iPhone 13 (iOS 27.2). Other devices, battery use and heat are not yet measured. English only.
+Published version: 0.1.1. Its device measurements are from an Apple M5 Mac (macOS 27.2) and an iPhone 13 (iOS 27.2).
+The development branch adds the runtime abstraction, model-specific CTC layouts, cancellation and CI described above;
+it still ships the same two English 110M models. Parakeet v3 is the next model milestone. Other devices, battery use and heat are not yet measured.
 
 [File an issue](https://github.com/BuilderHelm/BuilderHelmAudio/issues/new) if something breaks.
 

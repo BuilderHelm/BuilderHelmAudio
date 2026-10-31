@@ -15,6 +15,10 @@ public enum BuilderHelmAudioError: Error, LocalizedError, Equatable {
     case checksumMismatch(file: String)
     case unsupportedAudio(String)
     case modelLoadFailed(String)
+    case unsupportedArchitecture(String)
+    case unsupportedOperation(String)
+    case invalidModelConfiguration(String)
+    case invalidCtcConfiguration(String)
 
     public var errorDescription: String? {
         switch self {
@@ -22,6 +26,10 @@ public enum BuilderHelmAudioError: Error, LocalizedError, Equatable {
         case let .checksumMismatch(file): "\(file) does not match its pinned SHA-256; the download was discarded"
         case let .unsupportedAudio(reason): "Unsupported audio: \(reason)"
         case let .modelLoadFailed(reason): "Model failed to load: \(reason)"
+        case let .unsupportedArchitecture(architecture): "No runtime is available for architecture \(architecture)"
+        case let .unsupportedOperation(operation): "This model does not support \(operation)"
+        case let .invalidModelConfiguration(reason): "Invalid model configuration: \(reason)"
+        case let .invalidCtcConfiguration(reason): "Invalid CTC configuration: \(reason)"
         }
     }
 }
@@ -73,12 +81,14 @@ public actor ModelStore {
     /// Downloads and verifies the model if needed, and returns its folder.
     @discardableResult
     public func download(_ model: AsrModel, progress: (@Sendable (DownloadProgress) -> Void)? = nil) async throws -> URL {
+        try Task.checkCancellation()
         let directory = directory(for: model)
         if isDownloaded(model) { return directory }
         try prepareRoot()
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(Self.marker))
         var completed: Int64 = 0
         for file in model.files {
+            try Task.checkCancellation()
             let target = directory.appendingPathComponent(file.path)
             let done = completed
             progress?(DownloadProgress(completedBytes: done, totalBytes: model.totalBytes, currentFile: file.path))
@@ -89,6 +99,7 @@ public actor ModelStore {
             }
             completed += file.size
         }
+        try Task.checkCancellation()
         try Data(model.revision.utf8).write(to: directory.appendingPathComponent(Self.marker), options: .atomic)
         progress?(DownloadProgress(completedBytes: completed, totalBytes: model.totalBytes, currentFile: ""))
         return directory
@@ -96,8 +107,10 @@ public actor ModelStore {
 
     /// Re-hashes every downloaded file. Returns false and clears the ready mark if any file changed.
     public func verify(_ model: AsrModel) throws -> Bool {
+        try Task.checkCancellation()
         let directory = directory(for: model)
         for file in model.files {
+            try Task.checkCancellation()
             let url = directory.appendingPathComponent(file.path)
             guard size(of: url) == file.size, try Self.sha256(of: url) == file.sha256 else {
                 try? FileManager.default.removeItem(at: directory.appendingPathComponent(Self.marker))
@@ -119,10 +132,12 @@ public actor ModelStore {
             .appendingPathComponent(model.revision).appendingPathComponent(file.path)
         var lastError: Error = BuilderHelmAudioError.downloadFailed(file: file.path, status: 0)
         for attempt in 0..<3 {
+            try Task.checkCancellation()
             if attempt > 0 { try await Task.sleep(for: .seconds(attempt * 2)) }
             do {
                 let (temporary, response) = try await downloader.download(url, progress: written)
                 defer { try? FileManager.default.removeItem(at: temporary) }
+                try Task.checkCancellation()
                 if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                     lastError = BuilderHelmAudioError.downloadFailed(file: file.path, status: http.statusCode)
                     if (400..<500).contains(http.statusCode) { break }
@@ -131,10 +146,13 @@ public actor ModelStore {
                 guard size(of: temporary) == file.size, try Self.sha256(of: temporary) == file.sha256 else {
                     throw BuilderHelmAudioError.checksumMismatch(file: file.path)
                 }
+                try Task.checkCancellation()
                 try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
                 if FileManager.default.fileExists(atPath: target.path) { try FileManager.default.removeItem(at: target) }
                 try FileManager.default.moveItem(at: temporary, to: target)
                 return
+            } catch is CancellationError {
+                throw CancellationError()
             } catch let error as BuilderHelmAudioError {
                 throw error
             } catch {
@@ -167,7 +185,21 @@ public actor ModelStore {
 
 /// URLSession download tasks with byte progress. Task-specific delegates on the async API
 /// do not receive progress, so one session-level delegate routes callbacks by task.
-private final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    /// Covers cancellation racing with task creation; tasks are registered before being attached here.
+    private final class Cancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: URLSessionDownloadTask?
+        private var cancelled = false
+        func attach(_ task: URLSessionDownloadTask) {
+            let shouldCancel = lock.withLock { self.task = task; return cancelled }
+            if shouldCancel { task.cancel() }
+        }
+        func cancel() {
+            let task = lock.withLock { cancelled = true; return self.task }
+            task?.cancel()
+        }
+    }
     private struct Pending {
         let continuation: CheckedContinuation<(URL, URLResponse), Error>
         let progress: @Sendable (Int64) -> Void
@@ -176,14 +208,35 @@ private final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unche
 
     private let lock = NSLock()
     private var pending: [Int: Pending] = [:]
-    private lazy var session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+    private let configuration: URLSessionConfiguration
+    private lazy var session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+
+    init(configuration: URLSessionConfiguration = .default) {
+        self.configuration = configuration
+        super.init()
+    }
 
     /// Downloads `url` to a temporary file the caller must move or delete.
     func download(_ url: URL, progress: @escaping @Sendable (Int64) -> Void) async throws -> (URL, URLResponse) {
-        try await withCheckedThrowingContinuation { continuation in
-            let task = lock.withLock { session.downloadTask(with: url) }
-            lock.withLock { pending[task.taskIdentifier] = Pending(continuation: continuation, progress: progress) }
-            task.resume()
+        try Task.checkCancellation()
+        let cancellation = Cancellation()
+        do {
+            let result: (URL, URLResponse) = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    let task = lock.withLock { session.downloadTask(with: url) }
+                    lock.withLock { pending[task.taskIdentifier] = Pending(continuation: continuation, progress: progress) }
+                    cancellation.attach(task)
+                    task.resume()
+                }
+            } onCancel: { cancellation.cancel() }
+            if Task.isCancelled {
+                try? FileManager.default.removeItem(at: result.0)
+                throw CancellationError()
+            }
+            return result
+        } catch {
+            if Task.isCancelled { throw CancellationError() }
+            throw error
         }
     }
 
@@ -202,6 +255,7 @@ private final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unche
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let entry = lock.withLock({ pending.removeValue(forKey: task.taskIdentifier) }) else { return }
         if let error {
+            if let file = entry.file { try? FileManager.default.removeItem(at: file) }
             entry.continuation.resume(throwing: error)
         } else if let file = entry.file, let response = task.response {
             entry.continuation.resume(returning: (file, response))

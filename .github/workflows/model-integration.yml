@@ -1,0 +1,30 @@
+name: Real-model integration
+
+# Deliberately separate from PR CI: this job downloads real model weights.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Pinned 110M models and runtime parity
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      BUILDERHELM_INTEGRATION: "1"
+      # Hosted runners do not establish Neural Engine or real iPhone performance.
+      BUILDERHELM_TEST_COMPUTE: cpu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cache pinned model downloads (not compiled device caches)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Application Support/BuilderHelmAudio/Models
+          key: bhaudio-models-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Sources/BuilderHelmAudio/AsrModel.swift') }}
+      - name: Integration tests (rehash cached models, then run real inference)
+        run: swift test -c release --filter RealModelTests

@@ -1,21 +1,32 @@
 import Foundation
 
-/// CTC log-probabilities: one row of 1,025 values (1,024 tokens, then blank) every 80 ms.
+/// Frame-major CTC log-probabilities with a model-specific class layout and frame duration.
 public struct CtcLogProbabilities: Sendable {
+    /// Legacy 110M defaults. For arbitrary models, use the instance's `configuration`.
     public static let classCount = 1025
     public static let blank = 1024
     public static let frameDuration = 0.08
-    /// Frame-major values, `frameCount * 1025`.
+    public let configuration: CtcConfiguration
+    /// Frame-major values, `frameCount * configuration.classCount`.
     public let values: [Float]
-    public var frameCount: Int { values.count / Self.classCount }
+    public var frameCount: Int { values.count / configuration.classCount }
 
     public init(values: [Float]) {
         precondition(values.count % Self.classCount == 0, "values must hold whole frames of 1,025 classes")
         self.values = values
+        configuration = .parakeet110M
+    }
+
+    public init(values: [Float], configuration: CtcConfiguration) throws {
+        guard values.count % configuration.classCount == 0 else {
+            throw BuilderHelmAudioError.invalidCtcConfiguration("Probabilities must contain whole frames for the configured class count")
+        }
+        self.values = values
+        self.configuration = configuration
     }
 
     public subscript(frame: Int) -> ArraySlice<Float> {
-        values[(frame * Self.classCount)..<((frame + 1) * Self.classCount)]
+        values[(frame * configuration.classCount)..<((frame + 1) * configuration.classCount)]
     }
 }
 
@@ -39,21 +50,42 @@ public struct KeywordSpotter: Sendable {
     public static let defaultThreshold: Float = -1
 
     private let index: [String: Int]
+    public let configuration: CtcConfiguration?
+    public var isAvailable: Bool { configuration != nil }
 
     /// - Parameter vocabulary: the model's `vocab.json` pieces, in token order.
     public init(vocabulary: [String]) {
         index = Dictionary(vocabulary.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
+        configuration = .parakeet110M
     }
+
+    /// Vocabulary pieces are in class order with the blank class omitted, even if blank is not last.
+    public init(vocabulary: [String], configuration: CtcConfiguration) throws {
+        guard vocabulary.count == configuration.classCount - 1 else {
+            throw BuilderHelmAudioError.invalidCtcConfiguration("The keyword vocabulary must contain one piece per non-blank class")
+        }
+        index = Dictionary(vocabulary.enumerated().map { offset, piece in
+            (piece, offset < configuration.blank ? offset : offset + 1)
+        }, uniquingKeysWith: { first, _ in first })
+        self.configuration = configuration
+    }
+
+    private init() { index = [:]; configuration = nil }
+    static let unavailable = Self()
 
     /// Best hit for `phrase`, or nil when the vocabulary cannot spell it or the audio is empty.
     public func score(_ phrase: String, in probabilities: CtcLogProbabilities) -> KeywordHit? {
+        // The legacy nonthrowing API returns nil for an unavailable or incompatible spotter.
+        guard let configuration, configuration == probabilities.configuration else { return nil }
         let text = Array(phrase.split(separator: " ").map { "▁" + $0 }.joined())
         guard text.count > 1, probabilities.frameCount > 0 else { return nil }
         // Every vocabulary piece that spells text[from..<to].
         var arcs: [(from: Int, to: Int, id: Int)] = []
         for i in text.indices {
             for j in (i + 1)...text.count {
-                if let id = index[String(text[i..<j])] { arcs.append((i, j, id)) }
+                if let id = index[String(text[i..<j])], id < configuration.classCount, id != configuration.blank {
+                    arcs.append((i, j, id))
+                }
             }
         }
         guard arcs.contains(where: { $0.to == text.count }) else { return nil }
@@ -64,7 +96,7 @@ public struct KeywordSpotter: Sendable {
         var onArc = [Float](repeating: none, count: arcs.count), arcStart = [Int](repeating: 0, count: arcs.count)
         var onBlank = [Float](repeating: none, count: text.count), blankStart = [Int](repeating: 0, count: text.count)
         var best = none, bestStart = 0, bestEnd = 0
-        let values = probabilities.values, classes = CtcLogProbabilities.classCount
+        let values = probabilities.values, classes = configuration.classCount
         for frame in 0..<probabilities.frameCount {
             let row = frame * classes
             var nextArc = onArc, nextArcStart = arcStart
@@ -83,7 +115,7 @@ public struct KeywordSpotter: Sendable {
             for k in 1..<text.count {
                 var previous = onBlank[k], start = blankStart[k]
                 for b in endingAt[k] where onArc[b] > previous { previous = onArc[b]; start = arcStart[b] }
-                nextBlank[k] = previous + values[row + CtcLogProbabilities.blank]
+                nextBlank[k] = previous + values[row + configuration.blank]
                 nextBlankStart[k] = start
             }
             onArc = nextArc; arcStart = nextArcStart; onBlank = nextBlank; blankStart = nextBlankStart
@@ -91,8 +123,8 @@ public struct KeywordSpotter: Sendable {
         }
         guard best > none else { return nil }
         return KeywordHit(keyword: phrase, score: best / Float(text.count),
-                          start: Double(bestStart) * CtcLogProbabilities.frameDuration,
-                          end: Double(bestEnd + 1) * CtcLogProbabilities.frameDuration)
+                          start: Double(bestStart) * configuration.frameDuration,
+                          end: Double(bestEnd + 1) * configuration.frameDuration)
     }
 
     /// Hits scoring at or above `threshold`, best first.

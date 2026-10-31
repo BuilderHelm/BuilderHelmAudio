@@ -14,8 +14,10 @@ public struct TimedToken: Sendable, Equatable {
 public struct Transcript: Sendable {
     /// TDT transcript, or the CTC transcript for CTC-only models and `.ctc` mode.
     public let text: String
-    /// Greedy CTC transcript from the same encoder pass.
-    public let ctcText: String
+    /// Greedy CTC transcript, or nil if the selected model has no CTC output.
+    public let ctcTranscript: String?
+    /// Compatibility accessor. Use `ctcTranscript` to distinguish absent CTC from recognized silence.
+    public var ctcText: String { ctcTranscript ?? "" }
     /// TDT tokens with times; empty in CTC mode.
     public let tokens: [TimedToken]
     /// Audio length in seconds.
@@ -41,15 +43,15 @@ public enum ComputeUnits: Sendable {
     }
 }
 
-/// How a TDT + CTC model decodes. CTC-only models always use `.ctc`.
+/// How a model decodes. CTC-only models automatically select `.ctc` for compatibility.
 public enum DecodingMode: Sendable {
-    /// TDT transcript and token times, plus the CTC transcript.
+    /// TDT transcript, with timestamps and CTC output when the selected model supports them.
     case tdt
     /// CTC only: skips the TDT decoder.
     case ctc
 }
 
-/// Speech-to-text with a BuilderHelm Parakeet model.
+/// Speech-to-text with a BuilderHelm model, selected through its runtime architecture.
 ///
 /// ```swift
 /// let recognizer = try await SpeechRecognizer.load(.parakeetTdtCtc110M)
@@ -58,58 +60,72 @@ public enum DecodingMode: Sendable {
 /// ```
 ///
 /// Calls are queued and run one at a time off the caller's thread, so one instance can be shared.
+/// Cancellation is checked before queued work starts and after synchronous inference returns.
+/// An active CoreML prediction is not interrupted; the next request starts only after it finishes.
 public final class SpeechRecognizer: @unchecked Sendable {
     public let model: AsrModel?
     public let mode: DecodingMode
-    /// Spotter for this model's vocabulary.
-    public let keywordSpotter: KeywordSpotter
+    /// Capabilities available in the selected decoding mode.
+    public let capabilities: AsrCapabilities
+    public var supportedLanguages: [String] { model?.supportedLanguages ?? ["en"] }
+    /// Nil for models that do not support the CTC keyword spotter.
+    public let keywordSpotterIfAvailable: KeywordSpotter?
+    /// Legacy nonoptional access. An unavailable spotter returns no hits; prefer `spot` (throws)
+    /// or `keywordSpotterIfAvailable` when using different architectures.
+    public var keywordSpotter: KeywordSpotter { keywordSpotterIfAvailable ?? .unavailable }
 
-    private let runtime: ParakeetTdtCtc110M
-    private let pieces: [String]
+    private let runtime: any AsrRuntime
     private let queue = DispatchQueue(label: "BuilderHelmAudio.SpeechRecognizer", qos: .userInitiated)
 
     /// Downloads the model if needed, then loads it. The first load on a device also compiles it for CoreML.
     public static func load(_ model: AsrModel = .parakeetTdtCtc110M, mode: DecodingMode = .tdt,
                             computeUnits: ComputeUnits = .neuralEngine, store: ModelStore = .shared,
                             progress: (@Sendable (DownloadProgress) -> Void)? = nil) async throws -> SpeechRecognizer {
+        try Task.checkCancellation()
+        _ = try RuntimeSelection.resolve(model: model, mode: mode)
         let directory = try await store.download(model, progress: progress)
         let compiled = store.compiledModelsDirectory
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(with: Result {
-                    try SpeechRecognizer(directory: directory, model: model, mode: model.decodesTdt ? mode : .ctc,
-                                         computeUnits: computeUnits, compiledModelsDirectory: compiled)
-                })
-            }
+        return try await runOnQueue(.global(qos: .userInitiated)) { _ in
+            try SpeechRecognizer(directory: directory, model: model, mode: mode,
+                                 computeUnits: computeUnits, compiledModelsDirectory: compiled)
         }
     }
 
     /// Loads a model folder you manage yourself, for example one bundled with your app.
     /// Blocks while CoreML loads the model; call it off the main thread.
-    public init(directory: URL, model: AsrModel? = nil, mode: DecodingMode = .tdt, computeUnits: ComputeUnits = .neuralEngine,
+    public convenience init(directory: URL, model: AsrModel? = nil, mode: DecodingMode = .tdt, computeUnits: ComputeUnits = .neuralEngine,
                 compiledModelsDirectory: URL? = nil) throws {
-        let ctcOnly = mode == .ctc || model?.decodesTdt == false
+        // No descriptor retains the legacy bundled-110M behavior. Other architectures require a descriptor.
+        let selection = try RuntimeSelection.resolve(model: model, mode: mode)
+        let runtime: any AsrRuntime
         do {
-            runtime = try ParakeetTdtCtc110M(directory: directory, computeUnits: computeUnits.coreML, ctcOnly: ctcOnly,
-                                             cacheDirectory: compiledModelsDirectory ?? ModelStore.defaultRoot
-                                                 .appendingPathComponent("CompiledModels", isDirectory: true))
-            pieces = try JSONDecoder().decode([String].self, from: Data(contentsOf: directory.appendingPathComponent("vocab.json")))
+            runtime = try RuntimeFactory.make(selection: selection, directory: directory, computeUnits: computeUnits,
+                                              cache: compiledModelsDirectory ?? ModelStore.defaultRoot
+                                                .appendingPathComponent("CompiledModels", isDirectory: true))
         } catch {
             throw BuilderHelmAudioError.modelLoadFailed(String(describing: error))
         }
+        self.init(runtime: runtime, model: model)
+    }
+
+    init(runtime: any AsrRuntime, model: AsrModel? = nil) {
+        self.runtime = runtime
         self.model = model
-        self.mode = ctcOnly ? .ctc : .tdt
-        keywordSpotter = KeywordSpotter(vocabulary: pieces)
+        mode = runtime.mode
+        capabilities = runtime.capabilities
+        keywordSpotterIfAvailable = runtime.keywordSpotter
     }
 
     /// Transcribes an audio file in any format AVFoundation reads; it is converted to 16 kHz mono.
     /// The file is read in blocks, so long recordings don't need to fit in memory as audio.
     public func transcribe(file: URL, includeCtcLogProbabilities: Bool = false) async throws -> Transcript {
-        try await run {
+        try validateRequest(includeCtcLogProbabilities: includeCtcLogProbabilities)
+        return try await runOnQueue(queue) { cancellation in
             let audio = try AVAudioFile(forReading: file)
             let duration = Double(audio.length) / audio.fileFormat.sampleRate
             let start = DispatchTime.now().uptimeNanoseconds
-            let result = try self.runtime.transcribe(file: file, includeCtcLogProbs: includeCtcLogProbabilities)
+            let result = try self.runtime.transcribe(file: file, request: RuntimeRequest(
+                includeCtcLogProbabilities: includeCtcLogProbabilities, cancellation: cancellation))
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
             return self.transcript(result, duration: duration, elapsed: elapsed)
         }
@@ -117,9 +133,11 @@ public final class SpeechRecognizer: @unchecked Sendable {
 
     /// Transcribes 16 kHz mono samples in the range −1…1.
     public func transcribe(samples: [Float], includeCtcLogProbabilities: Bool = false) async throws -> Transcript {
-        try await run {
+        try validateRequest(includeCtcLogProbabilities: includeCtcLogProbabilities)
+        return try await runOnQueue(queue) { cancellation in
             let start = DispatchTime.now().uptimeNanoseconds
-            let result = try self.runtime.transcribe(samples, includeCtcLogProbs: includeCtcLogProbabilities)
+            let result = try self.runtime.transcribe(samples: samples, request: RuntimeRequest(
+                includeCtcLogProbabilities: includeCtcLogProbabilities, cancellation: cancellation))
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
             return self.transcript(result, duration: Double(samples.count) / 16000, elapsed: elapsed)
         }
@@ -128,9 +146,14 @@ public final class SpeechRecognizer: @unchecked Sendable {
     /// Transcribes the file and returns the keywords found in it, best first.
     public func spot(_ keywords: [String], inFile file: URL,
                      threshold: Float = KeywordSpotter.defaultThreshold) async throws -> [KeywordHit] {
+        guard capabilities.contains(.keywordSpotting), let spotter = keywordSpotterIfAvailable else {
+            throw BuilderHelmAudioError.unsupportedOperation("keyword spotting")
+        }
         let transcript = try await transcribe(file: file, includeCtcLogProbabilities: true)
-        guard let probabilities = transcript.ctcLogProbabilities else { return [] }
-        return keywordSpotter.detect(keywords, in: probabilities, threshold: threshold)
+        guard let probabilities = transcript.ctcLogProbabilities else {
+            throw BuilderHelmAudioError.invalidModelConfiguration("The keyword runtime did not return requested CTC probabilities")
+        }
+        return spotter.detect(keywords, in: probabilities, threshold: threshold)
     }
 
     /// Reads any AVFoundation-supported audio file as 16 kHz mono samples.
@@ -138,18 +161,15 @@ public final class SpeechRecognizer: @unchecked Sendable {
         do { return try ParakeetAudio.read(file) } catch { throw BuilderHelmAudioError.unsupportedAudio(String(describing: error)) }
     }
 
-    private func transcript(_ result: ParakeetResult, duration: Double, elapsed: Double) -> Transcript {
-        let tokens = zip(result.tokens, result.tokenTimes).map { id, time in
-            TimedToken(text: pieces.indices.contains(id) ? pieces[id].replacingOccurrences(of: "▁", with: " ") : "", time: time)
-        }
-        return Transcript(text: result.text, ctcText: result.ctcText, tokens: tokens, duration: duration,
+    private func transcript(_ result: RuntimeResult, duration: Double, elapsed: Double) -> Transcript {
+        Transcript(text: result.text, ctcTranscript: result.ctcText, tokens: result.tokens, duration: duration,
                           processingTime: elapsed,
-                          ctcLogProbabilities: result.ctcLogProbabilities.map { CtcLogProbabilities(values: $0.values) })
+                          ctcLogProbabilities: result.ctcLogProbabilities)
     }
 
-    private func run<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
-        try await withCheckedThrowingContinuation { continuation in
-            queue.async { continuation.resume(with: Result { try work() }) }
+    private func validateRequest(includeCtcLogProbabilities: Bool) throws {
+        if includeCtcLogProbabilities && !capabilities.contains(.ctc) {
+            throw BuilderHelmAudioError.unsupportedOperation("CTC probabilities")
         }
     }
 }

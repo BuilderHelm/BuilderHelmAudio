@@ -48,6 +48,18 @@ private func fixture(corrupt: Bool = false) throws -> (store: ModelStore, model:
     #expect(!store.isDownloaded(model))
 }
 
+@Test func cancelledDownloadDoesNotCreateModelStorage() async throws {
+    let (store, model, root) = try fixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let task = Task {
+        withUnsafeCurrentTask { $0?.cancel() }
+        return try await store.download(model)
+    }
+    await #expect(throws: CancellationError.self) { try await task.value }
+    #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("store").path))
+    #expect(!store.isDownloaded(model))
+}
+
 @Test func publishedManifestsArePinned() {
     for model in AsrModel.all {
         #expect(model.revision.count == 40 && model.revision.allSatisfy(\.isHexDigit))

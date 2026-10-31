@@ -5,11 +5,16 @@ import BuilderHelmAudio
 /// Downloads the real models from Hugging Face. Set BUILDERHELM_INTEGRATION=1
 /// (TEST_RUNNER_BUILDERHELM_INTEGRATION=1 with xcodebuild) to run.
 private let enabled = ProcessInfo.processInfo.environment["BUILDERHELM_INTEGRATION"] == "1"
+let realModelTestComputeUnits: ComputeUnits = ProcessInfo.processInfo.environment["BUILDERHELM_TEST_COMPUTE"] == "cpu" ? .cpu : .neuralEngine
 private let speech = Bundle.module.url(forResource: "speech", withExtension: "wav", subdirectory: "Fixtures")!
 
-@Test(.enabled(if: enabled), arguments: AsrModel.all)
+// Serial execution also prevents simultaneous first downloads of the same model through a reentrant actor.
+@Suite(.serialized, .enabled(if: enabled))
+struct RealModelTests {
+@Test(arguments: AsrModel.all)
 func transcribesAndSpots(model: AsrModel) async throws {
-    let recognizer = try await SpeechRecognizer.load(model)
+    if ModelStore.shared.isDownloaded(model) { #expect(try await ModelStore.shared.verify(model)) }
+    let recognizer = try await SpeechRecognizer.load(model, computeUnits: realModelTestComputeUnits)
     let transcript = try await recognizer.transcribe(file: speech)
     print("\(model.id): \(transcript.text) [\(Int(transcript.realTimeFactor))× real time]")
     #expect(transcript.text.lowercased().contains("quick brown fox jumps over the lazy dog"))
@@ -22,4 +27,5 @@ func transcribesAndSpots(model: AsrModel) async throws {
     #expect(Set(hits.map(\.keyword)) == ["fox", "Neural Engine"])
     let samples = try SpeechRecognizer.loadAudio(speech)
     #expect(try await recognizer.transcribe(samples: samples).text == transcript.text)
+}
 }

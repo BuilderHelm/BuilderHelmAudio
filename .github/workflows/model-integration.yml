@@ -1,11 +1,21 @@
 name: Real-model integration
 
-# Deliberately separate from PR CI: this job downloads real model weights.
+# A separate inference gate for changes that can affect real-model behavior.
 on:
+  pull_request:
+    paths:
+      - "Sources/**"
+      - "Tests/**"
+      - "Package.swift"
+      - ".github/workflows/model-integration.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: model-integration-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   integration:

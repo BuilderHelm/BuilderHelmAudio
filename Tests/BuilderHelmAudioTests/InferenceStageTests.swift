@@ -5,6 +5,58 @@ import Testing
 @testable import ParakeetRuntime
 
 extension RealModelTests {
+    /// Compare independent inputs and scalar reads so layout errors cannot make both paths agree.
+    @Test(arguments: AsrModel.all)
+    func longWindowsMatchIndependentInputs(model: AsrModel) async throws {
+        let directory = try await ModelStore.shared.download(model)
+        let url = Bundle.module.url(forResource: "long", withExtension: "wav", subdirectory: "Fixtures")!
+        let samples = try ParakeetAudio.read(url)
+        let runtime = try ParakeetTdtCtc110M(directory: directory, computeUnits: realModelTestComputeUnits.coreML,
+                                            ctcOnly: true, cacheDirectory: ModelStore.shared.compiledModelsDirectory)
+        let independent = try ParakeetTdtCtc110M(directory: directory, computeUnits: realModelTestComputeUnits.coreML,
+                                                ctcOnly: true, cacheDirectory: ModelStore.shared.compiledModelsDirectory)
+        // Exercise a change of function and input length before reusing the long function.
+        _ = try runtime.encode(samples.prefix(96_000), firstFrame: 0)
+        for start in stride(from: 0, to: samples.count - 96_000, by: 224_000) {
+            let chunk = samples[start..<min(start + 320_000, samples.count)]
+            let prepared = try runtime.prepare(chunk, firstFrame: start / 1280, forcedWindowSamples: 320_000)
+            let audio = try MLMultiArray(shape: [1, 320_000], dataType: .float32)
+            audio.withUnsafeMutableBufferPointer(ofType: Float.self) { buffer, strides in
+                for i in 0..<320_000 { buffer[i * strides[1]] = i < chunk.count ? chunk[chunk.startIndex + i] : 0 }
+            }
+            let length = try MLMultiArray(shape: [1], dataType: .int32)
+            length[0] = NSNumber(value: chunk.count)
+            let sameAudio = (0..<320_000).allSatisfy { audio[$0] == prepared.rung.audio[$0] }
+            #expect(sameAudio, "\(model.id) window \(start): reused PCM differs from independent PCM")
+            let reference = try predict(prepared.rung.preprocessor, inputs: ["audio": audio, "audio_length": length])
+            let rawMel = try #require(reference.featureValue(for: "mel")?.multiArrayValue)
+            let melDifferences = (0..<rawMel.count).filter { Float(Float16(rawMel[$0].floatValue)) != prepared.mel[$0].floatValue }.count
+            #expect(melDifferences == 0, "\(model.id) window \(start): \(melDifferences) mel values differ from independent input")
+            let output = try predict(prepared.rung.encoder, inputs: ["mel": prepared.mel, "mel_length": prepared.melLength])
+            let rawCtc = try #require(output.featureValue(for: "ctc_logprobs")?.multiArrayValue)
+            let frames = try #require(output.featureValue(for: "encoder_length")?.multiArrayValue)[0].intValue
+            let flat = ParakeetTdtCtc110M.contiguous(rawCtc, rows: frames)
+            let readDifferences = flat.indices.filter { flat[$0] != rawCtc[$0].floatValue }.count
+            #expect(readDifferences == 0, "\(model.id) window \(start): \(readDifferences) CTC values differ from scalar reads")
+            let snapshot = try ParakeetTdtCtc110M.snapshotTensor(rawCtc)
+            let copyDifferences = flat.indices.filter { rawCtc[$0] != snapshot[$0] }.count
+            #expect(copyDifferences == 0, "\(model.id) window \(start): \(copyDifferences) CTC values changed in snapshot")
+            let encoded = try runtime.runEncoder(prepared)
+            let repeated = ParakeetTdtCtc110M.contiguous(encoded.ctc, rows: encoded.frames)
+            let repeatDifferences = zip(flat, repeated).filter { $0 != $1 }.count
+            #expect(repeatDifferences == 0, "\(model.id) window \(start): \(repeatDifferences) CTC values changed on repeated prediction")
+            let other = try independent.prepare(chunk, firstFrame: start / 1280, forcedWindowSamples: 320_000)
+            let instanceMelDifferences = (0..<prepared.mel.count).filter { prepared.mel[$0] != other.mel[$0] }.count
+            #expect(instanceMelDifferences == 0, "\(model.id) window \(start): mel differs across runtime instances")
+            let otherEncoded = try independent.runEncoder(other)
+            let otherFlat = ParakeetTdtCtc110M.contiguous(otherEncoded.ctc, rows: otherEncoded.frames)
+            #expect(otherEncoded.frames == frames)
+            let instanceDifferences = zip(flat, otherFlat).filter { $0 != $1 }.count
+            #expect(instanceDifferences == 0, "\(model.id) window \(start): \(instanceDifferences) CTC values differ across runtime instances")
+            print("\(model.id) window \(start): frames=\(frames), PCM equal=\(sameAudio), mel/read/copy/repeat/instance-mel/instance-ctc differences=\(melDifferences)/\(readDifferences)/\(copyDifferences)/\(repeatDifferences)/\(instanceMelDifferences)/\(instanceDifferences)")
+        }
+    }
+
     @Test(arguments: AsrModel.all)
     func encoderOutputsSurviveTheNextPrediction(model: AsrModel) async throws {
         let directory = try await ModelStore.shared.download(model)

@@ -4,7 +4,7 @@ On-device speech recognition for Apple platforms. Swift, CoreML, Neural Engine.
 
 BuilderHelmAudio downloads [BuilderHelm's Parakeet models](https://huggingface.co/BuilderHelm) from Hugging Face, checks every file against a pinned SHA-256, keeps them on the device and runs them locally. No audio leaves the device.
 
-- **Fast**: about 1,000× real time on a Mac (M5): 5 minutes of audio in 0.3 seconds
+- **Fast**: about 1,000× real time on a Mac (M5), 400–600× on an iPhone 13
 - **Accurate**: 2.46% WER on LibriSpeech test-clean (TDT)
 - **Keyword spotting**: find names and terms in audio without a tokenizer
 - **Simple**: one call to download and load, one call to transcribe
@@ -54,12 +54,19 @@ Load the recognizer once and reuse it. Calls run off the caller's thread, one at
 
 ## Models
 
-| Model | Use | Download | Short clips | Long audio |
-|-------|-----|---------:|------------:|-----------:|
-| `.parakeetTdtCtc110M` | Transcription with token times, plus CTC | 144 MB | 860× | 791× |
-| `.parakeetCtc110M` | Fastest transcription and keyword spotting | 124 MB | 1,071× | 998× |
+| Model | Use | Download |
+|-------|-----|---------:|
+| `.parakeetTdtCtc110M` | Transcription with token times, plus CTC | 144 MB |
+| `.parakeetCtc110M` | Fastest transcription and keyword spotting | 124 MB |
 
-Speed is × real time on an Apple M5 Mac, from the model cards: [TDT + CTC](https://huggingface.co/BuilderHelm/Parakeet-TDT-CTC-110M-CoreML), [CTC](https://huggingface.co/BuilderHelm/Parakeet-CTC-110M-CoreML). English only. iPhone results will be published after on-device testing.
+Speed, × real time:
+
+| Model | Mac M5, short clips | Mac M5, long audio | iPhone 13, 6 s clip | iPhone 13, 72 s recording |
+|-------|--------------------:|-------------------:|--------------------:|--------------------------:|
+| `.parakeetTdtCtc110M` | 860× | 791× | 393× (15 ms) | 308× (233 ms) |
+| `.parakeetCtc110M` | 1,071× | 998× | 604× (10 ms) | 415× (173 ms) |
+
+Mac numbers and accuracy are from the model cards: [TDT + CTC](https://huggingface.co/BuilderHelm/Parakeet-TDT-CTC-110M-CoreML), [CTC](https://huggingface.co/BuilderHelm/Parakeet-CTC-110M-CoreML). iPhone 13 numbers are the median of 10 runs of the demo app's samples on iOS 27.2; transcripts match the Mac word for word. English only.
 
 Each model is pinned to a Hugging Face commit, so a given SDK version always runs the same files.
 

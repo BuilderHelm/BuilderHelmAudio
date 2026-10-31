@@ -69,6 +69,12 @@ public final class ParakeetTdtV3 {
 
     public init(directory: URL, computeUnits: MLComputeUnits = .cpuAndNeuralEngine, cacheDirectory: URL,
                 allowExperimentalLongAudio: Bool = true, decoderComputeUnits: MLComputeUnits? = nil) throws {
+        #if os(iOS)
+        guard computeUnits != .cpuAndGPU && computeUnits != .all,
+              decoderComputeUnits != .cpuAndGPU && decoderComputeUnits != .all else {
+            throw ParakeetError.badConfig("V3 GPU inference is not qualified on iOS; use CPU or Neural Engine")
+        }
+        #endif
         self.allowExperimentalLongAudio = allowExperimentalLongAudio
         self.encoderComputeUnits = computeUnits
         let decoder = JSONDecoder()

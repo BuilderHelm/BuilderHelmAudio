@@ -5,6 +5,21 @@ import Testing
 @testable import BuilderHelmAudio
 @testable import ParakeetRuntime
 
+#if os(iOS)
+@Test func v3RejectsUnqualifiedGpuBeforeOpeningModelFiles() throws {
+    let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    for units in [MLComputeUnits.cpuAndGPU, .all] {
+        do {
+            _ = try ParakeetTdtV3(directory: missing, computeUnits: units, cacheDirectory: missing)
+            Issue.record("Unqualified V3 GPU mode was accepted")
+        } catch ParakeetError.badConfig(let reason) {
+            #expect(reason.contains("GPU inference is not qualified on iOS"))
+        }
+    }
+    #expect(!FileManager.default.fileExists(atPath: missing.path))
+}
+#endif
+
 @Test func v3SelectionHasTruthfulCapabilitiesAndRejectsCtc() async throws {
     let model = AsrModel.experimentalParakeetV3
     let selection = try RuntimeSelection.resolve(model: model, mode: .tdt)

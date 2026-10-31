@@ -59,7 +59,7 @@ The final buffer-reuse runtime preserves exact CPU token sequences on 351/351 ba
 
 The target is **all Apple Silicon Macs, M1 onward, running macOS 15+**, plus iOS 18+. Physical qualification uses M5 and iPhone 13. Portable `.mlpackage` files compile locally; generic arm64/macOS 15 builds and CoreML8/specification-9 contracts are checked. No M5-only binary or compiled cache is distributed. A deployment audit and generic compilation do not reproduce execution or performance on every chip, old OS or 8 GB machine.
 
-The default requests CPU plus Neural Engine for the encoder, and CPU for the frontend, predictor and joint. Per-operation placement is determined by CoreML. CPU and GPU encoder modes are available. Hosted CI proves compilation, CPU inference and SDK behavior; it does not establish Neural Engine or physical-device performance.
+The default requests CPU plus Neural Engine for the encoder, and CPU for the frontend, predictor and joint. Per-operation placement is determined by CoreML. CPU is also available on iOS. GPU encoder mode is supported on Mac; V3 GPU requests on iOS fail during loading with an explicit error because repeated device diagnostics stalled on long-window switching. Hosted CI proves compilation, CPU inference and SDK behavior; it does not establish Neural Engine or physical-device performance.
 
 Publication requires a fresh 20-minute production-SDK phone run followed by 63 long recordings. A previous production run failed the latency and Long20 accuracy gates despite nominal-to-fair thermals. The partial-blank recovery and tensor-storage changes require a new sustained test; earlier short diagnostic timings do not qualify this runtime.
 

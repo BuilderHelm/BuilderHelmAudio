@@ -26,11 +26,13 @@ extension RealModelTests {
             }
             let length = try MLMultiArray(shape: [1], dataType: .int32)
             length[0] = NSNumber(value: chunk.count)
-            let sameAudio = (0..<320_000).allSatisfy { audio[$0] == prepared.rung.audio[$0] }
-            #expect(sameAudio, "\(model.id) window \(start): reused PCM differs from independent PCM")
+            let sameAudio = (0..<320_000).allSatisfy { audio[$0] == prepared.audio[$0] }
+            #expect(sameAudio, "\(model.id) window \(start): prepared PCM differs from independent PCM")
             let reference = try predict(prepared.rung.preprocessor, inputs: ["audio": audio, "audio_length": length])
             let rawMel = try #require(reference.featureValue(for: "mel")?.multiArrayValue)
             let melDifferences = (0..<rawMel.count).filter { Float(Float16(rawMel[$0].floatValue)) != prepared.mel[$0].floatValue }.count
+            let maximumMelError = (0..<rawMel.count).map { abs(Float(Float16(rawMel[$0].floatValue)) - prepared.mel[$0].floatValue) }.max() ?? 0
+            #expect(prepared.audioLength[0] == length[0])
             #expect(melDifferences == 0, "\(model.id) window \(start): \(melDifferences) mel values differ from independent input")
             let output = try predict(prepared.rung.encoder, inputs: ["mel": prepared.mel, "mel_length": prepared.melLength])
             let rawCtc = try #require(output.featureValue(for: "ctc_logprobs")?.multiArrayValue)
@@ -53,7 +55,7 @@ extension RealModelTests {
             #expect(otherEncoded.frames == frames)
             let instanceDifferences = zip(flat, otherFlat).filter { $0 != $1 }.count
             #expect(instanceDifferences == 0, "\(model.id) window \(start): \(instanceDifferences) CTC values differ across runtime instances")
-            print("\(model.id) window \(start): frames=\(frames), PCM equal=\(sameAudio), mel/read/copy/repeat/instance-mel/instance-ctc differences=\(melDifferences)/\(readDifferences)/\(copyDifferences)/\(repeatDifferences)/\(instanceMelDifferences)/\(instanceDifferences)")
+            print("\(model.id) window \(start): frames=\(frames), PCM equal=\(sameAudio), max mel error=\(maximumMelError), mel/read/copy/repeat/instance-mel/instance-ctc differences=\(melDifferences)/\(readDifferences)/\(copyDifferences)/\(repeatDifferences)/\(instanceMelDifferences)/\(instanceDifferences)")
         }
     }
 
@@ -86,7 +88,7 @@ extension RealModelTests {
             let chunk = samples.prefix(window.samples)
             let prepared = try runtime.prepare(chunk, firstFrame: 0)
             let reference = try predict(prepared.rung.preprocessor, inputs: [
-                "audio": prepared.rung.audio, "audio_length": runtime.length,
+                "audio": prepared.audio, "audio_length": prepared.audioLength,
             ])
             let mel = try #require(reference.featureValue(for: "mel")?.multiArrayValue)
             let converted = try ParakeetTdtCtc110M.encoderMelInput(mel)
@@ -115,7 +117,7 @@ extension RealModelTests {
                                             ctcOnly: true, cacheDirectory: ModelStore.shared.compiledModelsDirectory)
         let prepared = try runtime.prepare(samples[...], firstFrame: 0)
         let features = try predict(prepared.rung.preprocessor, inputs: [
-            "audio": prepared.rung.audio, "audio_length": runtime.length,
+            "audio": prepared.audio, "audio_length": prepared.audioLength,
         ])
         let mel = try #require(features.featureValue(for: "mel")?.multiArrayValue)
         let melLength = try #require(features.featureValue(for: "mel_length")?.multiArrayValue)

@@ -1,4 +1,5 @@
 import CoreML
+import Darwin
 import Foundation
 import Testing
 @testable import BuilderHelmAudio
@@ -186,4 +187,30 @@ import Testing
     let gaps = ParakeetTdtV3.blankSpans(primary, samples: changing)
     #expect(gaps.count == 1)
     #expect(gaps.first?.index == 3)
+}
+
+@Test func v3OwnedTensorsAreAlignedAndValidateAllocationSizes() throws {
+    let tensor = try ParakeetTdtV3.alignedOutput([1,1024,376])
+    let length = try ParakeetTdtV3.alignedOutput([1], .int32)
+    #expect(Int(bitPattern: tensor.dataPointer) % Int(getpagesize()) == 0)
+    #expect(Int(bitPattern: length.dataPointer) % Int(getpagesize()) == 0)
+    #expect(tensor.pixelBuffer == nil && length.pixelBuffer == nil)
+    #expect(tensor.strides.map(\.intValue) == [385024,376,1])
+    tensor[[0,1023,375]] = 4.25
+    #expect(tensor[tensor.count - 1].floatValue == 4.25)
+    #expect(throws: ParakeetError.self) { try ParakeetTdtV3.alignedOutput([1], .double) }
+    #expect(throws: ParakeetError.self) { try ParakeetTdtV3.alignedOutput([Int.max,2]) }
+    #expect(throws: ParakeetError.self) { try ParakeetTdtV3.alignedOutput([0]) }
+}
+
+@Test func v3ScopedArgmaxHonorsPaddedLogitStorage() throws {
+    let pointer = UnsafeMutablePointer<Float>.allocate(capacity: 10)
+    pointer.initialize(repeating: 999, count: 10)
+    let values: [Float] = [1,5,5,-1,4]
+    for (i, value) in values.enumerated() { pointer[i * 2] = value }
+    let logits = try MLMultiArray(dataPointer: pointer, shape: [1,1,1,5], dataType: .float32,
+        strides: [10,10,10,2], deallocator: { $0.assumingMemoryBound(to: Float.self).deallocate() })
+    #expect(try ParakeetTdtV3.argmax(logits, 0..<5) == 1)
+    pointer[8] = .infinity
+    #expect(throws: ParakeetError.self) { try ParakeetTdtV3.argmax(logits, 0..<5) }
 }

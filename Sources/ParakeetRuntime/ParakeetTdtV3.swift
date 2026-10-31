@@ -1,6 +1,7 @@
 import CoreML
 import CryptoKit
 import Foundation
+import Darwin
 
 /// Offline v3 runtime with bounded windows. Serialize calls on each instance.
 /// Transcript text is supported; emission frames are internal window-ownership markers, not aligned word times.
@@ -41,16 +42,23 @@ public final class ParakeetTdtV3 {
         let window: Window
         let frontend: MLModel, encoder: MLModel
         let audio: MLMultiArray, audioLength: MLMultiArray
-        let encoderOptions: MLPredictionOptions
+        let mel: MLMultiArray, melLength: MLMultiArray, featuresSnapshot: MLMultiArray
+        let encoderOptions: MLPredictionOptions?
         init(window: Window, frontend: MLModel, encoder: MLModel) throws {
             self.window = window; self.frontend = frontend; self.encoder = encoder
             audio = try ParakeetTdtV3.array([1,window.samples])
             audioLength = try ParakeetTdtV3.array([1],.int32)
-            encoderOptions = MLPredictionOptions()
-            encoderOptions.outputBackings = [
-                "encoder":try ParakeetTdtV3.array([1,1024,window.encoderFrames]),
-                "encoder_length":try ParakeetTdtV3.array([1],.int32),
-            ]
+            mel = try ParakeetTdtV3.array([1,128,window.melFrames])
+            melLength = try ParakeetTdtV3.array([1],.int32)
+            featuresSnapshot = try ParakeetTdtV3.array([1,1024,window.encoderFrames])
+            if encoder.configuration.computeUnits != .cpuAndGPU && encoder.configuration.computeUnits != .all {
+                let options = MLPredictionOptions()
+                options.outputBackings = [
+                    "encoder":try ParakeetTdtV3.alignedOutput([1,1024,window.encoderFrames]),
+                    "encoder_length":try ParakeetTdtV3.alignedOutput([1],.int32),
+                ]
+                encoderOptions = options
+            } else { encoderOptions = nil }
             try ParakeetTdtV3.validate(frontend, inputs: ["audio_signal":[1,window.samples],"audio_length":[1]], outputs:["mel":[1,128,window.melFrames],"mel_length":[1]])
             try ParakeetTdtV3.validate(encoder, inputs: ["mel":[1,128,window.melFrames],"mel_length":[1]], outputs:["encoder":[1,1024,window.encoderFrames],"encoder_length":[1]])
         }
@@ -420,15 +428,26 @@ public final class ParakeetTdtV3 {
         Self.zero(audio); Self.zero(hidden); Self.zero(cell)
         samples.withUnsafeBufferPointer { p in audio.dataPointer.assumingMemoryBound(to: Float.self).update(from: p.baseAddress!, count: samples.count) }
         audioLength[0] = NSNumber(value: samples.count)
-        let melOutput = try models.frontend.prediction(from: Self.provider(["audio_signal": audio, "audio_length": audioLength]))
-        try checkCancellation()
-        let mel = try Self.output(melOutput, "mel", [1,128,models.window.melFrames]), length = try Self.output(melOutput, "mel_length", [1])
-        guard length[0].intValue == samples.count / 160 else { throw ParakeetError.badConfig("Incorrect v3 mel valid length") }
-        let encoded = try models.encoder.prediction(from: Self.provider(["mel": mel, "mel_length": length]), options: models.encoderOptions)
-        try checkCancellation()
-        let features = try Self.output(encoded, "encoder", [1,1024,models.window.encoderFrames]), encodedLength = try Self.output(encoded, "encoder_length", [1])
-        let frames = encodedLength[0].intValue
-        guard frames == (samples.count / 160 + 7) / 8 else { throw ParakeetError.badConfig("Incorrect v3 encoder valid length") }
+        let frames = try autoreleasepool { () throws -> Int in
+            let melOutput = try models.frontend.prediction(from: Self.provider(["audio_signal": audio, "audio_length": audioLength]))
+            try checkCancellation()
+            let mel = try Self.output(melOutput, "mel", [1,128,models.window.melFrames])
+            let length = try Self.scalarLength(Self.output(melOutput, "mel_length", [1]))
+            guard length == samples.count / 160 else { throw ParakeetError.badConfig("Incorrect v3 mel valid length") }
+            try withExtendedLifetime((melOutput, models.frontend)) { try Self.copy(mel, into: models.mel) }
+            models.melLength[0] = NSNumber(value: length)
+            let input = try Self.provider(["mel": models.mel, "mel_length": models.melLength])
+            let encoded: MLFeatureProvider
+            if let options = models.encoderOptions { encoded = try models.encoder.prediction(from: input, options: options) }
+            else { encoded = try models.encoder.prediction(from: input) }
+            try checkCancellation()
+            let features = try Self.output(encoded, "encoder", [1,1024,models.window.encoderFrames])
+            let frames = try Self.scalarLength(Self.output(encoded, "encoder_length", [1]))
+            guard frames == (samples.count / 160 + 7) / 8 else { throw ParakeetError.badConfig("Incorrect v3 encoder valid length") }
+            try withExtendedLifetime((input, encoded, models.encoder)) { try Self.copy(features, into: models.featuresSnapshot) }
+            return frames
+        }
+        let features = models.featuresSnapshot
         var time = 0, symbols = 0, lastToken = 8192, needsPrediction = true
         var ids: [Int] = [], times: [Int] = []
         let predictorInput = try Self.provider(["targets": targets, "h_in": hidden, "c_in": cell])
@@ -475,8 +494,39 @@ public final class ParakeetTdtV3 {
         if !punctuation.isEmpty { value = value.replacingOccurrences(of: "(\\s)(" + punctuation + ")", with: "$2", options: .regularExpression) }
         return value
     }
+    private final class TensorStorage {
+        let address: UnsafeMutableRawPointer
+        init(bytes: Int, alignment: Int) throws {
+            var pointer: UnsafeMutableRawPointer?
+            let status = posix_memalign(&pointer, alignment, bytes)
+            guard status == 0, let pointer else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(status)) }
+            address = pointer
+            memset(address, 0, bytes)
+        }
+        deinit { free(address) }
+    }
+
+    /// Stable CPU-owned storage avoids pixel-buffer locks and satisfies CoreML's page-alignment guidance.
+    static func alignedOutput(_ shape: [Int], _ type: MLMultiArrayDataType = .float32) throws -> MLMultiArray {
+        guard !shape.isEmpty, type == .float32 || type == .int32 else {
+            throw ParakeetError.badConfig("Expected positive dimensions and a 32-bit tensor dtype")
+        }
+        var bytes = 4
+        for dimension in shape {
+            guard dimension > 0, dimension <= Int.max / bytes else { throw ParakeetError.badConfig("Tensor shape exceeds addressable memory") }
+            bytes *= dimension
+        }
+        let page = Int(getpagesize())
+        guard bytes <= Int.max - (page - 1) else { throw ParakeetError.badConfig("Tensor allocation exceeds addressable memory") }
+        let storage = try TensorStorage(bytes: (bytes + page - 1) / page * page, alignment: page)
+        var strides = [Int](repeating: 1, count: shape.count)
+        for i in stride(from: shape.count - 2, through: 0, by: -1) { strides[i] = strides[i + 1] * shape[i + 1] }
+        return try MLMultiArray(dataPointer: storage.address, shape: shape.map(NSNumber.init), dataType: type,
+                                strides: strides.map(NSNumber.init), deallocator: { _ in withExtendedLifetime(storage) {} })
+    }
+
     private static func array(_ shape: [Int], _ type: MLMultiArrayDataType = .float32) throws -> MLMultiArray {
-        try MLMultiArray(shape: shape.map(NSNumber.init), dataType: type)
+        try alignedOutput(shape, type)
     }
     private static func zero(_ a: MLMultiArray) { a.dataPointer.assumingMemoryBound(to: Float.self).update(repeating: 0, count: a.count) }
     private static func provider(_ arrays: [String: MLMultiArray]) throws -> MLDictionaryFeatureProvider {
@@ -486,28 +536,55 @@ public final class ParakeetTdtV3 {
         guard let a = provider.featureValue(for: key)?.multiArrayValue, a.shape.map(\.intValue) == shape else { throw ParakeetError.badConfig("Incorrect v3 output: \(key)") }
         return a
     }
+    private static func scalarLength(_ value: MLMultiArray) throws -> Int {
+        guard value.dataType == .int32, value.count == 1 else { throw ParakeetError.badConfig("Expected an int32 length") }
+        return value.withUnsafeBufferPointer(ofType: Int32.self) { Int($0[0]) }
+    }
     static func copy(_ source: MLMultiArray, into target: MLMultiArray) throws {
         guard source.dataType == .float32, target.dataType == .float32, source.shape == target.shape else { throw ParakeetError.badConfig("Incorrect predictor state layout") }
-        let shape = source.shape.map(\.intValue), strides = source.strides.map(\.intValue)
-        let input = source.dataPointer.assumingMemoryBound(to: Float.self), output = target.dataPointer.assumingMemoryBound(to: Float.self)
-        for index in 0..<source.count {
-            var remainder = index, offset = 0
-            for axis in shape.indices.reversed() { offset += (remainder % shape[axis]) * strides[axis]; remainder /= shape[axis] }
-            let value = input[offset]
-            guard value.isFinite else { throw ParakeetError.badConfig("Nonfinite predictor output") }
-            output[index] = value
+        let shape = source.shape.map(\.intValue)
+        try source.withUnsafeBufferPointer(ofType: Float.self) { inputBuffer in
+            let sourceStrides = source.strides.map(\.intValue)
+            try target.withUnsafeMutableBufferPointer(ofType: Float.self) { outputBuffer, targetStrides in
+                let input = inputBuffer.baseAddress!, output = outputBuffer.baseAddress!
+                if shape.count == 3 {
+                    for a in 0..<shape[0] { for b in 0..<shape[1] {
+                        let from = a * sourceStrides[0] + b * sourceStrides[1]
+                        let to = a * targetStrides[0] + b * targetStrides[1]
+                        for c in 0..<shape[2] {
+                            let value = input[from + c * sourceStrides[2]]
+                            guard value.isFinite else { throw ParakeetError.badConfig("Nonfinite tensor output") }
+                            output[to + c * targetStrides[2]] = value
+                        }
+                    } }
+                } else {
+                    for index in 0..<source.count {
+                        var remainder = index, from = 0, to = 0
+                        for axis in shape.indices.reversed() {
+                            let coordinate = remainder % shape[axis]
+                            from += coordinate * sourceStrides[axis]; to += coordinate * targetStrides[axis]
+                            remainder /= shape[axis]
+                        }
+                        let value = input[from]
+                        guard value.isFinite else { throw ParakeetError.badConfig("Nonfinite tensor output") }
+                        output[to] = value
+                    }
+                }
+            }
         }
     }
     static func argmax(_ a: MLMultiArray, _ range: Range<Int>) throws -> Int {
         guard a.dataType == .float32, a.shape.count == 4, a.shape.prefix(3).allSatisfy({ $0.intValue == 1 }), !range.isEmpty, range.lowerBound >= 0, range.upperBound <= a.count else { throw ParakeetError.badConfig("Expected float32 joint logits") }
-        let pointer = a.dataPointer.assumingMemoryBound(to: Float.self), stride = a.strides[3].intValue
-        var best = range.lowerBound, maximum = -Float.infinity
-        for index in range {
-            let value = pointer[index * stride]
-            guard value.isFinite else { throw ParakeetError.badConfig("Nonfinite joint logits") }
-            if value > maximum { maximum = value; best = index }
+        return try a.withUnsafeBufferPointer(ofType: Float.self) { buffer in
+            let pointer = buffer.baseAddress!, stride = a.strides[3].intValue
+            var best = range.lowerBound, maximum = -Float.infinity
+            for index in range {
+                let value = pointer[index * stride]
+                guard value.isFinite else { throw ParakeetError.badConfig("Nonfinite joint logits") }
+                if value > maximum { maximum = value; best = index }
+            }
+            return best
         }
-        return best
     }
 
     private static func validate(_ model: MLModel, inputs: [String: [Int]], outputs: [String: [Int]]) throws {

@@ -4,7 +4,7 @@ The public `SpeechRecognizer` owns an internal `AsrRuntime` implementation. Mode
 
 The first adapter wraps the `ParakeetTdtCtc110M` library. Both shipped packages use the `parakeet110M` architecture with different capabilities. This work prepares the SDK for other implementations; it does not add Parakeet v3 or advertise another supported model.
 
-The pinned 110M compatibility exports store the 20-second preprocessor's sample indices as constants. Encoder/decoder weights, vocabulary, normalization and window policies retain the v1.1.0 behavior. [The export patch script](../Scripts/fold-preprocessor-indices.py) reproduces the specification change from the original pinned preprocessor. Runtime tensor copies honor CoreML's actual strides, including padded output rows. Frozen mel-feature reference points cover every channel throughout a 20-second speech window.
+The pinned 110M compatibility exports store the 20-second preprocessor's sample indices as a binary constant tensor. Encoder/decoder weights, vocabulary, normalization and window policies retain the v1.1.0 behavior. [The export patch script](../Scripts/fold-preprocessor-indices.py) reproduces the specification change from the original pinned preprocessor. Runtime tensor copies honor CoreML's actual strides, including padded output rows. Frozen mel-feature reference points cover every channel throughout a 20-second speech window.
 
 ## Model metadata and dispatch
 

@@ -76,8 +76,8 @@ print(transcript.text)
 
 | Model | Best for | Output | Download | Model card |
 |---|---|---|---:|---|
-| **`.parakeetTdtCtc110M`** | Transcription with token times | TDT text + token times, CTC text | 144 MB | [Parakeet-TDT-CTC-110M-CoreML](https://huggingface.co/BuilderHelm/Parakeet-TDT-CTC-110M-CoreML) |
-| **`.parakeetCtc110M`** | Fastest transcription, keyword spotting | CTC text | 124 MB | [Parakeet-CTC-110M-CoreML](https://huggingface.co/BuilderHelm/Parakeet-CTC-110M-CoreML) |
+| **`.parakeetTdtCtc110M`** | Transcription with token times | TDT text + token times, CTC text | 145 MB | [Parakeet-TDT-CTC-110M-CoreML](https://huggingface.co/BuilderHelm/Parakeet-TDT-CTC-110M-CoreML) |
+| **`.parakeetCtc110M`** | Fastest transcription, keyword spotting | CTC text | 125 MB | [Parakeet-CTC-110M-CoreML](https://huggingface.co/BuilderHelm/Parakeet-CTC-110M-CoreML) |
 
 Both are NVIDIA's [Parakeet-TDT-CTC-110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m), converted to CoreML with an int8 encoder. English only. Each model is pinned to a Hugging Face commit, so a given SDK version always runs the same files.
 
@@ -111,7 +111,7 @@ targets: [
 ```swift
 import BuilderHelmAudio
 
-// Downloads the model on first use (144 MB), then loads it from the device
+// Downloads the model on first use (145 MB), then loads it from the device
 let recognizer = try await SpeechRecognizer.load(.parakeetTdtCtc110M) { progress in
     print("Downloading \(Int(progress.fraction * 100))%")
 }
@@ -268,7 +268,7 @@ Speed, × real time (higher is faster):
 - iOS 18+ or macOS 15+
 - Swift 6 (Xcode 16 or later)
 - A device with a Neural Engine for full speed; `computeUnits: .gpu` or `.cpu` also work
-- Disk: about twice the download per model (124–144 MB), including the copy CoreML compiles on first load
+- Disk: about twice the download per model (125–145 MB), including the copy CoreML compiles on first load
 - Network on first load only, to download the model from Hugging Face
 
 ---

@@ -6,6 +6,31 @@ import Testing
 @testable import ParakeetRuntime
 
 extension RealModelTests {
+    /// Inspect the export's input mask directly, before convolution and feature normalization.
+    @Test(arguments: AsrModel.all)
+    func preprocessorMaskPreservesEveryValidSample(model: AsrModel) async throws {
+        let directory = try await ModelStore.shared.download(model)
+        let probe = Bundle.module.url(forResource: "preprocessor-mask-probe", withExtension: "mlmodel", subdirectory: "Fixtures")!
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let package = scratch.appendingPathComponent("Preprocessor.mlpackage", isDirectory: true)
+        try FileManager.default.copyItem(at: directory.appendingPathComponent("Preprocessor.mlpackage"), to: package)
+        try Data(contentsOf: probe).write(to: package.appendingPathComponent("Data/com.apple.CoreML/model.mlmodel"))
+        let compiled = try ParakeetTdtCtc110M.modelURL(scratch, "Preprocessor", cache: ModelStore.shared.compiledModelsDirectory)
+        let mask = try ParakeetTdtCtc110M.load(compiled, .cpuOnly, "w20")
+        let audio = try MLMultiArray(shape: [1, 320_000], dataType: .float32)
+        audio.withUnsafeMutableBufferPointer(ofType: Float.self) { buffer, _ in buffer.update(repeating: 1) }
+        let length = try MLMultiArray(shape: [1], dataType: .int32)
+        for count in [320_000, 191_415, 320_000] {
+            length[0] = NSNumber(value: count)
+            let result = try predict(mask, inputs: ["audio": audio, "audio_length": length])
+            let masked = try #require(result.featureValue(for: "audio_1")?.multiArrayValue)
+            let incorrect = (0..<320_000).filter { masked[$0].floatValue != ($0 < count ? 1 : 0) }
+            #expect(incorrect.isEmpty, "\(model.id) length \(count): \(incorrect.count) incorrect mask samples; first \(incorrect.prefix(8))")
+        }
+    }
+
     /// Frozen points across every mel channel catch missing audio even if two broken paths agree.
     @Test(arguments: AsrModel.all)
     func longPreprocessingMatchesFrozenFeatures(model: AsrModel) async throws {

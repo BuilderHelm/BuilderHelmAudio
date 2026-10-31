@@ -117,7 +117,7 @@ class ConformerLayer(nn.Module):
 
 
 class Subsampling(nn.Module):
-    """dw_striding x8: (b, 80, T) mel -> (b, T/8, 512)."""
+    """dw_striding x8: (b, 128, T) mel -> (b, T/8, 1024)."""
 
     def __init__(self):
         super().__init__()
@@ -131,11 +131,11 @@ class Subsampling(nn.Module):
         self.out = nn.Linear(SUB_CHANNELS * (N_MELS // 8), D_MODEL)
 
     def forward(self, mel, length):
-        """mel (b, 80, T) with `length` valid frames.
+        """mel (b, 128, T) with `length` valid frames.
 
-        TODO: masking rule under study against NeMo.
+        Mask valid frames after each striding stage, matching the source encoder.
         """
-        x = mel.transpose(1, 2)[:, None]                    # (b, 1, T, 80)
+        x = mel.transpose(1, 2)[:, None]                    # (b, 1, T, 128)
         stages = ((0, 2), (2, 5), (5, 8))
         for begin, end in stages:
             for module in self.conv[begin:end]:
@@ -143,7 +143,7 @@ class Subsampling(nn.Module):
             length = (length + 1) // 2
             keep = torch.arange(x.shape[2], device=x.device)[None, :] < length[:, None]
             x = x * keep[:, None, :, None].to(x.dtype)
-        b, c, t, f = x.shape                                 # (b, 256, T/8, 10)
+        b, c, t, f = x.shape                                 # (b, 256, T/8, 16)
         return self.out(x.transpose(1, 2).reshape(b, t, SUB_CHANNELS * (N_MELS // 8)))
 
 
@@ -154,7 +154,7 @@ class Encoder(nn.Module):
         self.layers = nn.ModuleList(ConformerLayer() for _ in range(N_LAYERS))
 
     def forward(self, mel, mel_length):
-        """mel (b, 80, T), mel_length (b,) valid mel frames -> (b, T/8, 512)."""
+        """mel (b, 128, T), mel_length (b,) valid mel frames -> (b, T/8, 1024)."""
         x = self.pre_encode(mel, mel_length)
         t = x.shape[1]
         length = mel_length

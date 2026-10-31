@@ -47,16 +47,6 @@ import Testing
     #expect(throws: ParakeetError.self) { try ParakeetTdtV3.argmax(a, 0..<6) }
 }
 
-@Test func v3WindowOwnershipHasOneOwnerAtFrameAlignedSeams() {
-    let first = ParakeetTdtV3.Result(text: "", tokenIDs: [1,2,3], emissionFrames: [162,163,187])
-    let second = ParakeetTdtV3.Result(text: "", tokenIDs: [4,5,6,7], emissionFrames: [0,24,25,26])
-    var ids: [Int] = [], frames: [Int] = []
-    ParakeetTdtV3.appendOwned(first, start: 0, last: false, ids: &ids, frames: &frames)
-    ParakeetTdtV3.appendOwned(second, start: 176640, last: true, ids: &ids, frames: &frames)
-    #expect(ids == [1,6,7])
-    #expect(frames == [162,163,164])
-}
-
 @Test func v3AllowsAnExplicitSingleWindowRequestBudget() throws {
     try ParakeetTdtV3.validateSampleCount(240000, allowLongAudio: false)
     #expect(throws: ParakeetError.self) { try ParakeetTdtV3.validateSampleCount(240001, allowLongAudio: false) }
@@ -87,25 +77,23 @@ import Testing
 @Test func v3PausePlannerCutsInAQuietRunWithoutDiscardingSamples() {
     var audio = [Float](repeating: 0.2, count: 240001)
     for i in 160000..<164800 { audio[i] = 0 }
-    let plan = ParakeetTdtV3.planWindow(audio, left: 0)
+    let plan = ParakeetTdtV3.planWindow(audio)
     #expect(plan.count == 240000)
     #expect((160000..<164800).contains(plan.advance))
     #expect(plan.advance % 1280 == 0)
     #expect(plan.right == plan.advance)
-    #expect(plan.nextLeft == 0)
-    let next = ParakeetTdtV3.planWindow(Array(audio.dropFirst(plan.advance)), left: 0)
+    let next = ParakeetTdtV3.planWindow(Array(audio.dropFirst(plan.advance)))
     #expect(plan.advance + next.count == audio.count)
 }
 
 @Test func v3PausePlannerKeepsOverlapForContinuousSpeechAndIgnoresTinyGaps() {
     var audio = [Float](repeating: 0.2, count: 240001)
     for i in 160000..<160800 { audio[i] = 0 }
-    let plan = ParakeetTdtV3.planWindow(audio, left: 0)
+    let plan = ParakeetTdtV3.planWindow(audio)
     #expect(plan.count == 240000)
     #expect(plan.advance == 176640)
-    #expect(plan.right == plan.advance + plan.nextLeft)
-    #expect(plan.nextLeft == 32000)
-    let tail = ParakeetTdtV3.planWindow([Float](repeating: 0, count: 100), left: 32000)
+    #expect(plan.right - plan.advance == 32000)
+    let tail = ParakeetTdtV3.planWindow([Float](repeating: 0, count: 100))
     #expect(tail.count == 100)
 }
 
@@ -113,7 +101,7 @@ import Testing
     for gain: Float in [0.01, 0.1, 1] {
         var audio = [Float](repeating: gain, count: 240001)
         for i in 172800..<177920 { audio[i] = gain * 0.001 }
-        let plan = ParakeetTdtV3.planWindow(audio, left: 32000)
+        let plan = ParakeetTdtV3.planWindow(audio)
         #expect((128000...224000).contains(plan.advance))
         #expect((172800..<177920).contains(plan.advance))
         #expect(plan.advance % 1280 == 0)
@@ -122,18 +110,17 @@ import Testing
 
 @Test func v3LongWindowPlannerUsesContextAndKeepsFrameAlignedOwnership() {
     var samples = [Float](repeating: 0.2, count: 480001)
-    let continuous = ParakeetTdtV3.planWindow(samples, left: 0, windowSamples: 480000)
+    let continuous = ParakeetTdtV3.planWindow(samples, windowSamples: 480000)
     #expect(continuous.count == 480000)
     #expect(continuous.advance % 1280 == 0)
-    #expect(continuous.right == continuous.advance + continuous.nextLeft)
+    #expect(continuous.right - continuous.advance == 32000)
     #expect(continuous.right < continuous.count)
     for i in 400000..<405120 { samples[i] = 0 }
-    let paused = ParakeetTdtV3.planWindow(samples, left: 0, windowSamples: 480000)
+    let paused = ParakeetTdtV3.planWindow(samples, windowSamples: 480000)
     #expect(paused.count == 480000)
     #expect((400000..<405120).contains(paused.advance))
     #expect(paused.advance % 1280 == 0)
     #expect(paused.right == paused.advance)
-    #expect(paused.nextLeft == 0)
 }
 
 @Test func v3ConsensusJoinPreservesWordsWithShiftedEmissionFrames() {

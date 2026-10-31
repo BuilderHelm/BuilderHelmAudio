@@ -76,7 +76,7 @@ def main():
   write(args.out/'export-record.json',dict(source_repository='nvidia/parakeet-tdt-0.6b-v3',source_revision=SOURCE_REVISION,source_checkpoint_sha256=CHECKPOINT_SHA256,
    precision=args.precision,window_seconds=args.window_seconds,parts=args.parts,torch=torch.__version__,coremltools=ct.__version__,example_wav_sha256=sha(args.example_wav),files=files,
    validation='Example Torch reference only; full independent NeMo/CoreML parity must be run before accepting a new exporter revision.'))
-  if set(args.parts)==set(contracts):
+  if args.window_seconds == 15 and set(args.parts)==set(contracts):
    write(args.out/'config.json',dict(architecture='parakeet-tdt-0.6b-v3',precision=args.precision,sample_rate=16000,window_samples=args.window_seconds*16000,blank_id=8192,vocabulary_size=8192,
     durations=[0,1,2,3,4],max_symbols=10,punctuation=punctuation,files={k:v for k,v in files.items() if k.endswith('vocab.json') or '.mlpackage/' in k},
     source_revision=SOURCE_REVISION,frontend_precision='fp32',license='NVIDIA CC BY 4.0',experimental_long_audio=False))

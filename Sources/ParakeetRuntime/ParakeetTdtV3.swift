@@ -33,7 +33,7 @@ public final class ParakeetTdtV3 {
     private let config: Config
     private let pieces: [String]
     private let predictor: MLModel, joint: MLModel
-    private let directory: URL, cacheDirectory: URL
+    private let frontendURL: URL, encoderURL: URL
     private let encoderComputeUnits: MLComputeUnits
     private var requestWindowSamples = 240000
     private var activeWindow: WindowModels?
@@ -41,10 +41,16 @@ public final class ParakeetTdtV3 {
         let window: Window
         let frontend: MLModel, encoder: MLModel
         let audio: MLMultiArray, audioLength: MLMultiArray
+        let encoderOptions: MLPredictionOptions
         init(window: Window, frontend: MLModel, encoder: MLModel) throws {
             self.window = window; self.frontend = frontend; self.encoder = encoder
             audio = try ParakeetTdtV3.array([1,window.samples])
             audioLength = try ParakeetTdtV3.array([1],.int32)
+            encoderOptions = MLPredictionOptions()
+            encoderOptions.outputBackings = [
+                "encoder":try ParakeetTdtV3.array([1,1024,window.encoderFrames]),
+                "encoder_length":try ParakeetTdtV3.array([1],.int32),
+            ]
             try ParakeetTdtV3.validate(frontend, inputs: ["audio_signal":[1,window.samples],"audio_length":[1]], outputs:["mel":[1,128,window.melFrames],"mel_length":[1]])
             try ParakeetTdtV3.validate(encoder, inputs: ["mel":[1,128,window.melFrames],"mel_length":[1]], outputs:["encoder":[1,1024,window.encoderFrames],"encoder_length":[1]])
         }
@@ -56,7 +62,7 @@ public final class ParakeetTdtV3 {
     public init(directory: URL, computeUnits: MLComputeUnits = .cpuAndNeuralEngine, cacheDirectory: URL,
                 allowExperimentalLongAudio: Bool = true, decoderComputeUnits: MLComputeUnits? = nil) throws {
         self.allowExperimentalLongAudio = allowExperimentalLongAudio
-        self.directory = directory; self.cacheDirectory = cacheDirectory; self.encoderComputeUnits = computeUnits
+        self.encoderComputeUnits = computeUnits
         let decoder = JSONDecoder()
         config = try decoder.decode(Config.self, from: Data(contentsOf: directory.appendingPathComponent("config.json")))
         guard config.architecture == "parakeet-tdt-0.6b-v3", ["fp32", "fp16"].contains(config.precision),
@@ -101,6 +107,12 @@ public final class ParakeetTdtV3 {
                 return try ParakeetTdtCtc110M.load(url, units, nil)
             }
         }
+        let compiled = try autoreleasepool { () throws -> (URL,URL) in
+            let front = try ParakeetTdtCtc110M.modelURL(directory,"Preprocessor",cache:cacheDirectory,allowBundledCompiled:false)
+            let enc = try ParakeetTdtCtc110M.modelURL(directory,"Encoder",cache:cacheDirectory,allowBundledCompiled:false)
+            return (front,enc)
+        }
+        frontendURL = compiled.0; encoderURL = compiled.1
         predictor = try load("Predictor", decoderComputeUnits ?? computeUnits)
         joint = try load("Joint", decoderComputeUnits ?? computeUnits)
         targets = try Self.array([1, 1], .int32)
@@ -123,7 +135,7 @@ public final class ParakeetTdtV3 {
             ?? Window(samples: 240000, function: nil)
         let current = try autoreleasepool { () throws -> WindowModels in
             func load(_ name: String, _ units: MLComputeUnits) throws -> MLModel {
-                let url = try ParakeetTdtCtc110M.modelURL(directory, name, cache: cacheDirectory, allowBundledCompiled: false)
+                let url = name == "Preprocessor" ? frontendURL : encoderURL
                 return try ParakeetTdtCtc110M.load(url, units, window.function)
             }
             return try WindowModels(window:window,frontend:load("Preprocessor",.cpuOnly),encoder:load("Encoder",encoderComputeUnits))
@@ -135,7 +147,7 @@ public final class ParakeetTdtV3 {
     /// Bounded offline segmentation. Prefer quiet pauses; retain overlap context when no pause is available.
     public func transcribe(file: URL, checkCancellation: () throws -> Void = {}) throws -> Result {
         let reader = try ParakeetAudio.Reader(file)
-        var buffer = try reader.read(config.windows == nil ? 240001 : 480001), start = 0, left = 0
+        var buffer = try reader.read(config.windows == nil ? 240001 : 480001), start = 0
         requestWindowSamples = windowSize(for: buffer.count)
         var allIDs: [Int] = [], allFrames: [Int] = []
         var pending: PendingWindow?
@@ -146,13 +158,13 @@ public final class ParakeetTdtV3 {
         }
         while !buffer.isEmpty {
             try checkCancellation()
-            let plan = Self.planWindow(buffer, left: left, windowSamples: requestWindowSamples)
+            let plan = Self.planWindow(buffer, windowSamples: requestWindowSamples)
             let window = try autoreleasepool { try decodeLongWindow(Array(buffer.prefix(plan.count)), checkCancellation: checkCancellation) }
             Self.consume(window, start: start, seam: start + plan.right, pending: &pending, ids: &allIDs, frames: &allFrames)
             if buffer.count <= requestWindowSamples { break }
             buffer.removeFirst(plan.advance)
             buffer.append(contentsOf: try reader.read(plan.advance))
-            start += plan.advance; left = plan.nextLeft
+            start += plan.advance
         }
         if let last = pending { Self.flush(last, through: last.result.tokenIDs.count, ids: &allIDs, frames: &allFrames) }
         return Result(text: text(allIDs), tokenIDs: allIDs, emissionFrames: allFrames)
@@ -163,25 +175,25 @@ public final class ParakeetTdtV3 {
         try Self.validateSampleCount(samples.count, allowLongAudio: allowExperimentalLongAudio)
         requestWindowSamples = windowSize(for: samples.count)
         if samples.count <= requestWindowSamples { return try autoreleasepool { try decode(samples, checkCancellation: checkCancellation) } }
-        var start = 0, left = 0, allIDs: [Int] = [], allFrames: [Int] = []
+        var start = 0, allIDs: [Int] = [], allFrames: [Int] = []
         var pending: PendingWindow?
         while start < samples.count {
             try checkCancellation()
             let buffer = Array(samples[start..<min(start + requestWindowSamples + 1, samples.count)])
-            let plan = Self.planWindow(buffer, left: left, windowSamples: requestWindowSamples)
+            let plan = Self.planWindow(buffer, windowSamples: requestWindowSamples)
             let window = try autoreleasepool { try decodeLongWindow(Array(buffer.prefix(plan.count)), checkCancellation: checkCancellation) }
             Self.consume(window, start: start, seam: start + plan.right, pending: &pending, ids: &allIDs, frames: &allFrames)
             if buffer.count <= requestWindowSamples { break }
-            start += plan.advance; left = plan.nextLeft
+            start += plan.advance
         }
         if let last = pending { Self.flush(last, through: last.result.tokenIDs.count, ids: &allIDs, frames: &allFrames) }
         return Result(text: text(allIDs), tokenIDs: allIDs, emissionFrames: allFrames)
     }
 
-    struct WindowPlan { let count: Int; let advance: Int; let right: Int; let nextLeft: Int }
-    static func planWindow(_ samples: [Float], left: Int, windowSamples: Int = 240000) -> WindowPlan {
+    struct WindowPlan { let count: Int; let advance: Int; let right: Int }
+    static func planWindow(_ samples: [Float], windowSamples: Int = 240000) -> WindowPlan {
         if samples.count <= windowSamples {
-            return WindowPlan(count: samples.count, advance: samples.count, right: samples.count, nextLeft: 0)
+            return WindowPlan(count: samples.count, advance: samples.count, right: samples.count)
         }
         // 10 ms RMS blocks. Relative threshold adapts to gain; the floor covers digital silence.
         var energy = [Float](repeating: 0, count: windowSamples/160)
@@ -206,11 +218,11 @@ public final class ParakeetTdtV3 {
         }
         if let pause = best {
             let cut = ((pause.cut * 160 + 640) / 1280) * 1280
-            return WindowPlan(count: windowSamples, advance: cut, right: cut, nextLeft: 0)
+            return WindowPlan(count: windowSamples, advance: cut, right: cut)
         }
         // Continuous speech keeps the original frame-aligned context ownership.
         let stride = ((windowSamples - 63360) / 1280) * 1280
-        return WindowPlan(count: windowSamples, advance: stride, right: stride+32000, nextLeft: 32000)
+        return WindowPlan(count: windowSamples, advance: stride, right: stride+32000)
     }
     private struct PendingWindow {
         let result: Result
@@ -272,13 +284,6 @@ public final class ParakeetTdtV3 {
         }
     }
 
-    static func appendOwned(_ result: Result, start: Int, last: Bool, ids: inout [Int], frames: inout [Int]) {
-        let left = start == 0 ? 0 : 32000, right = last ? 240000 : 208640
-        for (id, frame) in zip(result.tokenIDs, result.emissionFrames) where frame * 1280 >= left && frame * 1280 < right {
-            ids.append(id); frames.append(start / 1280 + frame)
-        }
-    }
-
     private func decodeLongWindow(_ samples: [Float], retryDepth: Int = 0, checkCancellation: () throws -> Void) throws -> Result {
         let first = try decode(samples, checkCancellation: checkCancellation)
         // The source model can blank an entire speech window at an unlucky cut.
@@ -312,7 +317,7 @@ public final class ParakeetTdtV3 {
         try checkCancellation()
         let mel = try Self.output(melOutput, "mel", [1,128,models.window.melFrames]), length = try Self.output(melOutput, "mel_length", [1])
         guard length[0].intValue == samples.count / 160 else { throw ParakeetError.badConfig("Incorrect v3 mel valid length") }
-        let encoded = try models.encoder.prediction(from: Self.provider(["mel": mel, "mel_length": length]))
+        let encoded = try models.encoder.prediction(from: Self.provider(["mel": mel, "mel_length": length]), options: models.encoderOptions)
         try checkCancellation()
         let features = try Self.output(encoded, "encoder", [1,1024,models.window.encoderFrames]), encodedLength = try Self.output(encoded, "encoder_length", [1])
         let frames = encodedLength[0].intValue

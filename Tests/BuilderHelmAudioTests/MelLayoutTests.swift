@@ -51,6 +51,17 @@ func tensorReadsPreservePaddedRowsAndColumns(halfPrecision: Bool) throws {
     #expect(ParakeetTdtCtc110M.row(source, 1) == Array(expected[3..<6]))
 }
 
+@Test(arguments: [false, true])
+func tensorSnapshotsOwnTheirStorage(halfPrecision: Bool) throws {
+    let (source, original) = try paddedFeatures(halfPrecision: halfPrecision)
+    let snapshot = try ParakeetTdtCtc110M.snapshotTensor(source)
+    source[[0, 0, 0]] = 999
+    let expected = halfPrecision ? original.map { Float(Float16($0)) } : original
+    #expect(ParakeetTdtCtc110M.contiguous(snapshot, rows: 2) == expected)
+    snapshot[[0, 1, 2]] = 123
+    #expect(source[[0, 1, 2]].floatValue == 0)
+}
+
 @Test func pixelBufferTensorReadsUseTheCurrentBackingLayout() throws {
     let width = 1025, rows = 3
     let attributes = [kCVPixelBufferIOSurfacePropertiesKey as String: [:],

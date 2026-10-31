@@ -563,7 +563,12 @@ public final class ParakeetTdtCtc110M {
     // MARK: - Encoder
 
     struct Prepared { let rung: Rung; let firstFrame: Int; let mel: MLMultiArray; let melLength: MLMultiArray }
-    struct Encoded { let firstFrame: Int; let frames: Int; let ctc: MLMultiArray; let projection: MLMultiArray? }
+    struct Encoded {
+        let firstFrame: Int
+        let frames: Int
+        let ctc: MLMultiArray
+        let projection: MLMultiArray?
+    }
 
     func encode(_ samples: ArraySlice<Float>, firstFrame: Int, retainCtcProbabilities: Bool = true,
                 reuseLargestWindow: Bool = false, forcedWindowSamples: Int? = nil) throws -> Window {
@@ -634,13 +639,25 @@ public final class ParakeetTdtCtc110M {
 
     /// The Neural Engine stage; touches only the rung's encoder and the job's own arrays.
     func runEncoder(_ job: Prepared) throws -> Encoded {
-        let out = try job.rung.encoder.prediction(from: MLDictionaryFeatureProvider(dictionary: [
-            "mel": job.mel, "mel_length": job.melLength]))
+        let model = job.rung.encoder
+        let input = try MLDictionaryFeatureProvider(dictionary: ["mel": job.mel, "mel_length": job.melLength])
+        let out = try model.prediction(from: input)
         let frames = out.featureValue(for: "encoder_length")!.multiArrayValue![0].intValue
         let projection = out.featureValue(for: "encoder_proj")?.multiArrayValue
         guard !decodesTdt || projection != nil else { throw ParakeetError.badConfig("TDT decoding requires encoder_proj") }
-        return Encoded(firstFrame: job.firstFrame, frames: frames, ctc: out.featureValue(for: "ctc_logprobs")!.multiArrayValue!,
-                       projection: projection)
+        // The pipeline consumes these tensors after another prediction may have started.
+        // Own their storage before releasing the prediction context or reusing the encoder.
+        return try withExtendedLifetime((job, model, input, out)) {
+            Encoded(firstFrame: job.firstFrame, frames: frames,
+                    ctc: try Self.snapshotTensor(out.featureValue(for: "ctc_logprobs")!.multiArrayValue!),
+                    projection: try decodesTdt ? projection.map(Self.snapshotTensor) : nil)
+        }
+    }
+
+    static func snapshotTensor(_ source: MLMultiArray) throws -> MLMultiArray {
+        let owned = try MLMultiArray(shape: source.shape, dataType: source.dataType)
+        source.transfer(to: owned)
+        return owned
     }
 
     /// CTC probability copy and per-frame argmax.

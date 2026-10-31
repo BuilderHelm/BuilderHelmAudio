@@ -85,12 +85,13 @@ public final class ParakeetTdtCtc110M {
     final class Rung {
         let samples: Int
         private let function: String, preprocessorURL: URL, encoderURL: URL, units: MLComputeUnits
-        private struct Models { let preprocessor: MLModel; let encoder: MLModel }
+        private struct Models { let preprocessor: MLModel; let encoder: MLModel; let audio: MLMultiArray }
         private var models: Models?
         var lastUse: UInt64 = 0
         var isLoaded: Bool { models != nil }
         var preprocessor: MLModel { models!.preprocessor }
         var encoder: MLModel { models!.encoder }
+        var audio: MLMultiArray { models!.audio }
         init(_ window: Config.Window, preprocessorURL: URL, encoderURL: URL, units: MLComputeUnits) {
             samples = window.samples
             function = window.function; self.preprocessorURL = preprocessorURL; self.encoderURL = encoderURL; self.units = units
@@ -98,7 +99,8 @@ public final class ParakeetTdtCtc110M {
         func load() throws {
             guard models == nil else { return }
             models = try Models(preprocessor: ParakeetTdtCtc110M.load(preprocessorURL, .cpuOnly, function),
-                                encoder: ParakeetTdtCtc110M.load(encoderURL, units, function))
+                                encoder: ParakeetTdtCtc110M.load(encoderURL, units, function),
+                                audio: MLMultiArray(shape: [1, NSNumber(value: samples)], dataType: .float32))
         }
         func unload() { models = nil }
     }
@@ -168,6 +170,7 @@ public final class ParakeetTdtCtc110M {
     let hidden = 640
     let blocks: MLMultiArray              // [1, block, 640]
     let token: MLMultiArray
+    let length: MLMultiArray
 
     /// - Parameters:
     ///   - directory: folder with Preprocessor/Encoder bundles, config.json, vocab.json,
@@ -288,6 +291,7 @@ public final class ParakeetTdtCtc110M {
         block = shape[1].intValue
         blocks = try MLMultiArray(shape: shape, dataType: .float32)
         token = try MLMultiArray(shape: [1, 1], dataType: .int32)
+        length = try MLMultiArray(shape: [1], dataType: .int32)
         rungUseClock = UInt64(rungs.count)
     }
 
@@ -558,14 +562,7 @@ public final class ParakeetTdtCtc110M {
 
     // MARK: - Encoder
 
-    struct Prepared {
-        let rung: Rung
-        let firstFrame: Int
-        let audio: MLMultiArray
-        let audioLength: MLMultiArray
-        let mel: MLMultiArray
-        let melLength: MLMultiArray
-    }
+    struct Prepared { let rung: Rung; let firstFrame: Int; let mel: MLMultiArray; let melLength: MLMultiArray }
     struct Encoded {
         let firstFrame: Int
         let frames: Int
@@ -586,10 +583,7 @@ public final class ParakeetTdtCtc110M {
         let n = samples.count
         let rung = forcedWindowSamples.flatMap { size in rungs.first { $0.samples == size } } ?? (reuseLargestWindow ? longRung : (rungs.first { $0.samples >= n } ?? longRung))
         try ensureLoaded(rung, protecting: busy)
-        // Keep each prediction's inputs independent, including across window functions.
-        let pcm = try MLMultiArray(shape: [1, NSNumber(value: rung.samples)], dataType: .float32)
-        let length = try MLMultiArray(shape: [1], dataType: .int32)
-        pcm.withUnsafeMutableBufferPointer(ofType: Float.self) { audio, strides in
+        rung.audio.withUnsafeMutableBufferPointer(ofType: Float.self) { audio, strides in
             let stride = strides[1]
             if stride == 1 {
                 samples.withUnsafeBufferPointer { audio.baseAddress!.update(from: $0.baseAddress!, count: n) }
@@ -600,15 +594,13 @@ public final class ParakeetTdtCtc110M {
             }
         }
         length[0] = NSNumber(value: n)
-        let input = try MLDictionaryFeatureProvider(dictionary: ["audio": pcm, "audio_length": length])
-        let pre = try rung.preprocessor.prediction(from: input)
+        let pre = try rung.preprocessor.prediction(from: MLDictionaryFeatureProvider(dictionary: [
+            "audio": rung.audio, "audio_length": length]))
         let mel32 = pre.featureValue(for: "mel")!.multiArrayValue!
         let mel = try Self.encoderMelInput(mel32)
         let melLength = try MLMultiArray(shape: [1], dataType: .int32)
         melLength[0] = pre.featureValue(for: "mel_length")!.multiArrayValue![0]
-        return withExtendedLifetime((input, pre)) {
-            Prepared(rung: rung, firstFrame: firstFrame, audio: pcm, audioLength: length, mel: mel, melLength: melLength)
-        }
+        return Prepared(rung: rung, firstFrame: firstFrame, mel: mel, melLength: melLength)
     }
 
     /// CoreML output rows may be padded (for example, width 801 with row stride 816).

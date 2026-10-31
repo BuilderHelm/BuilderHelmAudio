@@ -1,10 +1,43 @@
 import CoreML
+import CryptoKit
 import Foundation
 import Testing
 @testable import BuilderHelmAudio
 @testable import ParakeetRuntime
 
 extension RealModelTests {
+    /// Frozen points across every mel channel catch missing audio even if two broken paths agree.
+    @Test(arguments: AsrModel.all)
+    func longPreprocessingMatchesFrozenFeatures(model: AsrModel) async throws {
+        struct Reference: Decodable {
+            let fixtureSHA256: String
+            let sampleCount: Int
+            let frames: [Int]
+            let channels: [[Float]]
+        }
+        let fixture = Bundle.module.url(forResource: "long", withExtension: "wav", subdirectory: "Fixtures")!
+        let referenceURL = Bundle.module.url(forResource: "long-mel-reference", withExtension: "json", subdirectory: "Fixtures")!
+        let reference = try JSONDecoder().decode(Reference.self, from: Data(contentsOf: referenceURL))
+        let digest = SHA256.hash(data: try Data(contentsOf: fixture)).map { String(format: "%02x", $0) }.joined()
+        try #require(digest == reference.fixtureSHA256)
+        let directory = try await ModelStore.shared.download(model)
+        let runtime = try ParakeetTdtCtc110M(directory: directory, computeUnits: realModelTestComputeUnits.coreML,
+                                            ctcOnly: true, cacheDirectory: ModelStore.shared.compiledModelsDirectory)
+        let samples = try ParakeetAudio.read(fixture)
+        for iteration in 0..<3 {
+            let prepared = try runtime.prepare(samples.prefix(reference.sampleCount), firstFrame: 0)
+            var maximumError: Float = 0
+            for (channel, expected) in reference.channels.enumerated() {
+                for (frame, value) in zip(reference.frames, expected) {
+                    let actual = prepared.mel[[0, NSNumber(value: channel), NSNumber(value: frame)]].floatValue
+                    maximumError = actual.isFinite ? max(maximumError, abs(actual - value)) : .infinity
+                }
+            }
+            // Allow float32 kernel variation and the final float16 cast, not missing speech.
+            #expect(maximumError < 0.01, "\(model.id) iteration \(iteration): frozen mel error \(maximumError)")
+        }
+    }
+
     /// Compare independent inputs and scalar reads so layout errors cannot make both paths agree.
     @Test(arguments: AsrModel.all)
     func longWindowsMatchIndependentInputs(model: AsrModel) async throws {
@@ -26,26 +59,13 @@ extension RealModelTests {
             }
             let length = try MLMultiArray(shape: [1], dataType: .int32)
             length[0] = NSNumber(value: chunk.count)
-            let sameAudio = (0..<320_000).allSatisfy { audio[$0] == prepared.audio[$0] }
+            let sameAudio = (0..<320_000).allSatisfy { audio[$0] == prepared.rung.audio[$0] }
             #expect(sameAudio, "\(model.id) window \(start): prepared PCM differs from independent PCM")
             let reference = try predict(prepared.rung.preprocessor, inputs: ["audio": audio, "audio_length": length])
             let rawMel = try #require(reference.featureValue(for: "mel")?.multiArrayValue)
-            let diagnosticName = "\(model.id)-\(start)"
-            try captureTensor(prepared.audio, name: diagnosticName + "-pcm-prepared")
-            try captureTensor(audio, name: diagnosticName + "-pcm-reference")
-            try captureTensor(prepared.audioLength, name: diagnosticName + "-length-prepared")
-            try captureTensor(length, name: diagnosticName + "-length-reference")
-            try captureTensor(prepared.mel, name: diagnosticName + "-mel-prepared")
-            try captureTensor(rawMel, name: diagnosticName + "-mel-reference")
-            let options = MLPredictionOptions()
-            options.outputBackings = ["mel": try MLMultiArray(shape: rawMel.shape, dataType: rawMel.dataType),
-                                      "mel_length": try MLMultiArray(shape: [1], dataType: .int32)]
-            let backedOutput = try predict(prepared.rung.preprocessor, inputs: ["audio": audio, "audio_length": length], options: options)
-            let backedMel = try #require(backedOutput.featureValue(for: "mel")?.multiArrayValue)
-            try captureTensor(backedMel, name: diagnosticName + "-mel-backed")
             let melDifferences = (0..<rawMel.count).filter { Float(Float16(rawMel[$0].floatValue)) != prepared.mel[$0].floatValue }.count
             let maximumMelError = (0..<rawMel.count).map { abs(Float(Float16(rawMel[$0].floatValue)) - prepared.mel[$0].floatValue) }.max() ?? 0
-            #expect(prepared.audioLength[0] == length[0])
+            #expect(runtime.length[0] == length[0])
             #expect(melDifferences == 0, "\(model.id) window \(start): \(melDifferences) mel values differ from independent input")
             let output = try predict(prepared.rung.encoder, inputs: ["mel": prepared.mel, "mel_length": prepared.melLength])
             let rawCtc = try #require(output.featureValue(for: "ctc_logprobs")?.multiArrayValue)
@@ -61,9 +81,6 @@ extension RealModelTests {
             let repeatDifferences = zip(flat, repeated).filter { $0 != $1 }.count
             #expect(repeatDifferences == 0, "\(model.id) window \(start): \(repeatDifferences) CTC values changed on repeated prediction")
             let other = try independent.prepare(chunk, firstFrame: start / 1280, forcedWindowSamples: 320_000)
-            try captureTensor(other.audio, name: diagnosticName + "-pcm-independent")
-            try captureTensor(other.mel, name: diagnosticName + "-mel-independent")
-            try captureTensor(prepared.mel, name: diagnosticName + "-mel-after-encoder")
             let instanceMelDifferences = (0..<prepared.mel.count).filter { prepared.mel[$0] != other.mel[$0] }.count
             #expect(instanceMelDifferences == 0, "\(model.id) window \(start): mel differs across runtime instances")
             let otherEncoded = try independent.runEncoder(other)
@@ -104,7 +121,7 @@ extension RealModelTests {
             let chunk = samples.prefix(window.samples)
             let prepared = try runtime.prepare(chunk, firstFrame: 0)
             let reference = try predict(prepared.rung.preprocessor, inputs: [
-                "audio": prepared.audio, "audio_length": prepared.audioLength,
+                "audio": prepared.rung.audio, "audio_length": runtime.length,
             ])
             let mel = try #require(reference.featureValue(for: "mel")?.multiArrayValue)
             let converted = try ParakeetTdtCtc110M.encoderMelInput(mel)
@@ -133,7 +150,7 @@ extension RealModelTests {
                                             ctcOnly: true, cacheDirectory: ModelStore.shared.compiledModelsDirectory)
         let prepared = try runtime.prepare(samples[...], firstFrame: 0)
         let features = try predict(prepared.rung.preprocessor, inputs: [
-            "audio": prepared.audio, "audio_length": prepared.audioLength,
+            "audio": prepared.rung.audio, "audio_length": runtime.length,
         ])
         let mel = try #require(features.featureValue(for: "mel")?.multiArrayValue)
         let melLength = try #require(features.featureValue(for: "mel_length")?.multiArrayValue)
@@ -159,39 +176,8 @@ extension RealModelTests {
     }
 }
 
-private func predict(_ model: MLModel, inputs: [String: Any], options: MLPredictionOptions = MLPredictionOptions()) throws -> any MLFeatureProvider {
-    try model.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs), options: options)
-}
-
-/// Optional CI evidence for diagnosing OS-specific tensor layouts, using only bundled test audio.
-private func captureTensor(_ tensor: MLMultiArray, name: String) throws {
-    guard let path = ProcessInfo.processInfo.environment["BUILDERHELM_STAGE_DIAGNOSTICS"] else { return }
-    let directory = URL(fileURLWithPath: path, isDirectory: true)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let scalar = (0..<tensor.count).map { tensor[$0].floatValue }
-    let shape = tensor.shape.map(\.intValue), initialStrides = tensor.strides.map(\.intValue)
-    var scopedStrides: [Int] = []
-    let scoped: [Float] = tensor.withUnsafeBytes { bytes in
-        scopedStrides = tensor.strides.map(\.intValue)
-        return (0..<tensor.count).map { index in
-            var remainder = index, offset = 0
-            for axis in shape.indices.reversed() {
-                offset += (remainder % shape[axis]) * scopedStrides[axis]
-                remainder /= shape[axis]
-            }
-            switch tensor.dataType {
-            case .float16: return Float(bytes.baseAddress!.assumingMemoryBound(to: Float16.self)[offset])
-            case .float32: return bytes.baseAddress!.assumingMemoryBound(to: Float.self)[offset]
-            case .int32: return Float(bytes.baseAddress!.assumingMemoryBound(to: Int32.self)[offset])
-            default: return .nan
-            }
-        }
-    }
-    let metadata: [String: Any] = ["shape": shape, "initialStrides": initialStrides, "scopedStrides": scopedStrides,
-                                   "dataType": tensor.dataType.rawValue]
-    try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]).write(to: directory.appendingPathComponent(name + ".json"))
-    try scalar.withUnsafeBytes { try Data($0).write(to: directory.appendingPathComponent(name + "-scalar.f32")) }
-    try scoped.withUnsafeBytes { try Data($0).write(to: directory.appendingPathComponent(name + "-scoped.f32")) }
+private func predict(_ model: MLModel, inputs: [String: Any]) throws -> any MLFeatureProvider {
+    try model.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs))
 }
 
 private func tensorSummary(_ array: MLMultiArray) -> String {

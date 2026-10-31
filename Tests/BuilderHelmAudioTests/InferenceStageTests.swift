@@ -6,6 +6,71 @@ import Testing
 @testable import ParakeetRuntime
 
 extension RealModelTests {
+    @Test(arguments: AsrModel.all)
+    func exposedPreprocessorStagesMatchReference(model: AsrModel) async throws {
+        struct Points: Decodable { let indices: [Int]; let values: [Float] }
+        struct Reference: Decodable { let sampleCount: Int; let stages: [String: Points] }
+        let referenceURL = Bundle.module.url(forResource: "preprocessor-stage-reference", withExtension: "json", subdirectory: "Fixtures")!
+        let reference = try JSONDecoder().decode(Reference.self, from: Data(contentsOf: referenceURL))
+        let fixture = Bundle.module.url(forResource: "long", withExtension: "wav", subdirectory: "Fixtures")!
+        let samples = Array(try ParakeetAudio.read(fixture).prefix(reference.sampleCount))
+        let directory = try await ModelStore.shared.download(model)
+        let audio = try MLMultiArray(shape: [1, NSNumber(value: samples.count)], dataType: .float32)
+        audio.withUnsafeMutableBufferPointer(ofType: Float.self) { buffer, _ in
+            samples.withUnsafeBufferPointer { buffer.baseAddress!.update(from: $0.baseAddress!, count: samples.count) }
+        }
+        let length = try MLMultiArray(shape: [1], dataType: .int32)
+        length[0] = NSNumber(value: samples.count)
+        let stages = try loadPreprocessorProbe(directory: directory, resource: "preprocessor-stages-probe")
+        for iteration in 0..<2 {
+            let output = try predict(stages, inputs: ["audio": audio, "audio_length": length])
+            let masked = try #require(output.featureValue(for: "audio_1")?.multiArrayValue)
+            let incorrectPCM = samples.indices.filter { masked[$0].floatValue != samples[$0] }
+            #expect(incorrectPCM.isEmpty, "\(model.id) exposed mask: \(incorrectPCM.count) wrong samples, first \(incorrectPCM.prefix(8))")
+            let padded = try #require(output.featureValue(for: "x")?.multiArrayValue)
+            var incorrectWaveform: [Int] = []
+            var maximumWaveformError: Float = 0
+            for i in 0..<padded.count {
+                let sample = i - 256
+                let expected: Float = samples.indices.contains(sample)
+                    ? samples[sample] - 0.97 * (sample > 0 ? samples[sample - 1] : 0) : 0
+                let actual = padded[i].floatValue
+                let error = actual.isFinite ? abs(actual - expected) : .infinity
+                maximumWaveformError = max(maximumWaveformError, error)
+                if error > 0.000001 { incorrectWaveform.append(i) }
+            }
+            #expect(incorrectWaveform.isEmpty, "\(model.id) pre-emphasis: \(incorrectWaveform.count) wrong samples, first \(incorrectWaveform.prefix(8)), max error \(maximumWaveformError)")
+            for name in reference.stages.keys.sorted() {
+                let points = reference.stages[name]!
+                let tensor = try #require(output.featureValue(for: name)?.multiArrayValue)
+                var maximumError: Float = 0
+                var incorrect = 0
+                for (index, expected) in zip(points.indices, points.values) {
+                    let actual = tensor[index].floatValue
+                    let error = actual.isFinite ? abs(actual - expected) : .infinity
+                    maximumError = max(maximumError, error)
+                    if error > 0.01 { incorrect += 1 }
+                }
+                print("\(model.id) iteration \(iteration) exposed \(name): incorrect points=\(incorrect), max error=\(maximumError)")
+                #expect(incorrect == 0, "\(model.id) exposed \(name): \(incorrect) incorrect points, max error \(maximumError)")
+            }
+        }
+        // Test an equivalent graph without changing the SDK's currently pinned exports.
+        let candidate = try loadPreprocessorProbe(directory: directory, resource: "preprocessor-multiply-mask-probe")
+        let points = reference.stages["mel"]!
+        for iteration in 0..<3 {
+            let output = try predict(candidate, inputs: ["audio": audio, "audio_length": length])
+            let mel = try #require(output.featureValue(for: "mel")?.multiArrayValue)
+            var maximumError: Float = 0
+            for (index, expected) in zip(points.indices, points.values) {
+                let actual = mel[index].floatValue
+                maximumError = actual.isFinite ? max(maximumError, abs(actual - expected)) : .infinity
+            }
+            print("\(model.id) iteration \(iteration) arithmetic mask: max mel error=\(maximumError)")
+            #expect(maximumError < 0.01, "\(model.id) arithmetic mask: max mel error \(maximumError)")
+        }
+    }
+
     /// Inspect the export's input mask directly, before convolution and feature normalization.
     @Test(arguments: AsrModel.all)
     func preprocessorMaskPreservesEveryValidSample(model: AsrModel) async throws {
@@ -203,6 +268,18 @@ extension RealModelTests {
 
 private func predict(_ model: MLModel, inputs: [String: Any]) throws -> any MLFeatureProvider {
     try model.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs))
+}
+
+private func loadPreprocessorProbe(directory: URL, resource: String) throws -> MLModel {
+    let probe = Bundle.module.url(forResource: resource, withExtension: "mlmodel", subdirectory: "Fixtures")!
+    let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    let package = scratch.appendingPathComponent("Preprocessor.mlpackage", isDirectory: true)
+    try FileManager.default.copyItem(at: directory.appendingPathComponent("Preprocessor.mlpackage"), to: package)
+    try Data(contentsOf: probe).write(to: package.appendingPathComponent("Data/com.apple.CoreML/model.mlmodel"))
+    let compiled = try ParakeetTdtCtc110M.modelURL(scratch, "Preprocessor", cache: ModelStore.shared.compiledModelsDirectory)
+    return try ParakeetTdtCtc110M.load(compiled, .cpuOnly, "w20")
 }
 
 private func tensorSummary(_ array: MLMultiArray) -> String {

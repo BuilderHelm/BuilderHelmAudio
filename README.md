@@ -323,7 +323,7 @@ bash Scripts/ci-ios.sh                        # selects an installed compatible 
 
 The iOS Simulator has no Neural Engine, so its speed is not representative. For device numbers, use the [demo app](#demo-app).
 
-The development branch adds automatic macOS/iOS unit CI and a separate manual real-model integration workflow.
+The development branch adds automatic macOS/iOS unit CI and a separate real-model integration check for runtime/test changes.
 See [runtime architecture and CI](Documentation/RuntimeArchitecture.md) and [milestone 1 validation](Documentation/Milestone1Validation.md).
 Real-model tests use pinned files; set `BUILDERHELM_TEST_COMPUTE=cpu` for CPU-only inference.
 

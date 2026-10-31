@@ -585,14 +585,41 @@ public final class ParakeetTdtCtc110M {
         let pre = try rung.preprocessor.prediction(from: MLDictionaryFeatureProvider(dictionary: [
             "audio": rung.audio, "audio_length": length]))
         let mel32 = pre.featureValue(for: "mel")!.multiArrayValue!
-        let mel = try MLMultiArray(shape: mel32.shape, dataType: .float16)
-        let src = mel32.dataPointer.assumingMemoryBound(to: Float.self)
-        let dst = mel.dataPointer.assumingMemoryBound(to: Float16.self)
-        for i in 0..<mel32.count { dst[i] = Float16(src[i]) }
+        let mel = try Self.encoderMelInput(mel32)
         let melLength = try MLMultiArray(shape: [1], dataType: .int32)
         melLength.dataPointer.assumingMemoryBound(to: Int32.self)[0] =
             pre.featureValue(for: "mel_length")!.multiArrayValue!.dataPointer.assumingMemoryBound(to: Int32.self)[0]
         return Prepared(rung: rung, firstFrame: firstFrame, mel: mel, melLength: melLength)
+    }
+
+    /// CoreML output rows may be padded (for example, width 801 with row stride 816).
+    /// Copy logical values rather than interpreting padding as the next mel channel.
+    static func encoderMelInput(_ features: MLMultiArray) throws -> MLMultiArray {
+        guard features.shape.count == 3, features.shape[0].intValue == 1,
+              features.dataType == .float32 || features.dataType == .float16 else {
+            throw ParakeetError.badConfig("Expected float32/float16 mel features with shape [1, channels, frames]")
+        }
+        let mel = try MLMultiArray(shape: features.shape, dataType: .float16)
+        let channels = features.shape[1].intValue, frames = features.shape[2].intValue
+        let sourceRow = features.strides[1].intValue, sourceColumn = features.strides[2].intValue
+        let targetRow = mel.strides[1].intValue, targetColumn = mel.strides[2].intValue
+        let destination = mel.dataPointer.assumingMemoryBound(to: Float16.self)
+        if features.dataType == .float32 {
+            let source = features.dataPointer.assumingMemoryBound(to: Float.self)
+            for channel in 0..<channels {
+                for frame in 0..<frames {
+                    destination[channel * targetRow + frame * targetColumn] = Float16(source[channel * sourceRow + frame * sourceColumn])
+                }
+            }
+        } else {
+            let source = features.dataPointer.assumingMemoryBound(to: Float16.self)
+            for channel in 0..<channels {
+                for frame in 0..<frames {
+                    destination[channel * targetRow + frame * targetColumn] = source[channel * sourceRow + frame * sourceColumn]
+                }
+            }
+        }
+        return mel
     }
 
     /// The Neural Engine stage; touches only the rung's encoder and the job's own arrays.

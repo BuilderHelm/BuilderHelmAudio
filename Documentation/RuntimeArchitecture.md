@@ -75,7 +75,7 @@ Model downloads check cancellation before storage work, between files and before
 
 The default [CI workflow](../.github/workflows/ci.yml) builds and unit-tests on macOS with Xcode 16.0 and 16.4, and runs iOS Simulator tests with Xcode 16.4. It downloads no model weights. `Scripts/ci-ios.sh` selects an installed iPhone runtime compatible with the selected simulator SDK.
 
-The separate [Real-model integration workflow](../.github/workflows/model-integration.yml) is manual (`workflow_dispatch`). It caches only pinned downloaded models, rehashes those files, and runs the serialized real-model suite in release mode on CPU. It does not claim Neural Engine or phone performance. Both workflows need to be pushed before GitHub can execute them.
+The separate [Real-model integration workflow](../.github/workflows/model-integration.yml) runs for pull requests that change runtime sources, tests, the package manifest or the integration workflow. It can also be started manually (`workflow_dispatch`). It caches only pinned downloaded models, rehashes those files, and runs the serialized real-model suite in release mode on CPU. It does not claim Neural Engine or phone performance.
 
 ```bash
 swift test

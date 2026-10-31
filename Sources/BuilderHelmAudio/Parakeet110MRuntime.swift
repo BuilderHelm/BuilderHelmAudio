@@ -2,7 +2,7 @@ import CoreML
 import Foundation
 import ParakeetRuntime
 
-/// Adapter around the unchanged, published 110M inference implementation.
+/// Adapter around the shared 110M inference implementation.
 final class Parakeet110MRuntime: AsrRuntime {
     let mode: DecodingMode
     let capabilities: AsrCapabilities

@@ -13,7 +13,7 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
     public let id: String
     /// Hugging Face repository, for example `BuilderHelm/Parakeet-CTC-110M-CoreML`.
     public let repository: String
-    /// Release tag the pinned commit belongs to.
+    /// Base model release. Compatibility revisions can fix the export graph without changing trained weights.
     public let version: String
     /// Full commit hash. Downloads use this, so a moved tag or branch cannot change the files.
     public let revision: String
@@ -49,12 +49,13 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
                   ctcConfiguration: .parakeet110M, files: files)
     }
 
+    // The pinned compatibility exports use bounded feature predictions followed by full-window normalization before CoreML compilation.
     /// Parakeet TDT + CTC 110M: TDT transcript with token times, plus CTC from the same encoder pass.
     public static let parakeetTdtCtc110M = AsrModel(
         id: "parakeet-tdt-ctc-110m",
         repository: "BuilderHelm/Parakeet-TDT-CTC-110M-CoreML",
         version: "1.1.0",
-        revision: "85a37ceaebc43645bc3ad4fd9594cdab0f38e745",
+        revision: "261cc46b2b8a89448c19b1d7daccd5416259c9a8",
         architecture: .parakeet110M,
         supportedLanguages: ["en"],
         capabilities: [.tdt, .ctc, .tokenTimestamps, .keywordSpotting],
@@ -66,16 +67,16 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
                  sha256: "b2b8fdc4c8adcfd4f1ea851c862c463ced05cc35a1aebb20fa2eaec8b9b0da27"),
             File(path: "Encoder.mlpackage/Manifest.json", size: 617,
                  sha256: "51dd5c87244a688739c8e2f08d7e60064ad24ce33f74cd77fb9fa03ada548578"),
-            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 40_405,
-                 sha256: "9def4672829e834402d523bcd4ea69366fde9873f669418a80466b5480a3f2ef"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 59_787,
+                 sha256: "15edb0776d2dc4195cee57bf8d049787061a50eb7d5941e00d3eed9b5f249428"),
             File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 5_890_820,
                  sha256: "41b2384ebe5ae8b3760b4a31c13b4d6145db3196b55c2b4f2a11b0e85b5b7e30"),
             File(path: "Preprocessor.mlpackage/Manifest.json", size: 617,
                  sha256: "422610cf421d9331f6f5117d2543d808532a9a46c0e8f2387d2a3be51cba56aa"),
             File(path: "TdtDecoder.bin", size: 20_033_560,
                  sha256: "1e4c6c9173d76b25cfa158181bad301c8beef667069ef92d5bd1dbeb1cabc784"),
-            File(path: "config.json", size: 5_334,
-                 sha256: "13546c2b9ced9f4ce03180266284865bce2aa55f52ebb72a6b90a92322f87ad2"),
+            File(path: "config.json", size: 5_365,
+                 sha256: "fa6b8041f6f72953ba1fabe6cf3ae0042ea4e7a640bccaf610795851a9aeb9c0"),
             File(path: "vocab.json", size: 9_004,
                  sha256: "ecbc3fe1c391a3feea1d1c39f8c15af674bd03cbaf0d0f5de4a564771c16bd16"),
         ])
@@ -85,7 +86,7 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
         id: "parakeet-ctc-110m",
         repository: "BuilderHelm/Parakeet-CTC-110M-CoreML",
         version: "1.1.0",
-        revision: "cf9ce52bbc83def86524cbf2af1e3756f0b68133",
+        revision: "436962caa4bb6d546cf3980bc9313b03361736f7",
         architecture: .parakeet110M,
         supportedLanguages: ["en"],
         capabilities: [.ctc, .keywordSpotting],
@@ -97,14 +98,14 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
                  sha256: "b2b8fdc4c8adcfd4f1ea851c862c463ced05cc35a1aebb20fa2eaec8b9b0da27"),
             File(path: "Encoder.mlpackage/Manifest.json", size: 617,
                  sha256: "19b440d4fea6d14bc88d41fd8d64252a246c459d9de06a75199f869e4170deed"),
-            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 40_405,
-                 sha256: "9def4672829e834402d523bcd4ea69366fde9873f669418a80466b5480a3f2ef"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 59_787,
+                 sha256: "15edb0776d2dc4195cee57bf8d049787061a50eb7d5941e00d3eed9b5f249428"),
             File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 5_890_820,
                  sha256: "41b2384ebe5ae8b3760b4a31c13b4d6145db3196b55c2b4f2a11b0e85b5b7e30"),
             File(path: "Preprocessor.mlpackage/Manifest.json", size: 617,
                  sha256: "422610cf421d9331f6f5117d2543d808532a9a46c0e8f2387d2a3be51cba56aa"),
-            File(path: "config.json", size: 2_897,
-                 sha256: "b0a7a3f8d15493a13ab8fddaca1945128978686c0db6a3526f3e9cd3d434eeda"),
+            File(path: "config.json", size: 2_928,
+                 sha256: "44633b7fb12cb99ac7c5a4837dd3ba2d426bec7e72ab46b939a80da3a9b64e85"),
             File(path: "vocab.json", size: 9_004,
                  sha256: "ecbc3fe1c391a3feea1d1c39f8c15af674bd03cbaf0d0f5de4a564771c16bd16"),
         ])

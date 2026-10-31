@@ -2,7 +2,9 @@
 
 The public `SpeechRecognizer` owns an internal `AsrRuntime` implementation. Model metadata selects the implementation; decoder-specific result conversion belongs to that implementation.
 
-The first adapter wraps the existing `ParakeetTdtCtc110M` library without changing its model files, decoder or long-audio pipeline. Both shipped packages use the `parakeet110M` architecture with different capabilities. This work prepares the SDK for other implementations; it does not add Parakeet v3 or advertise another supported model.
+The first adapter wraps the `ParakeetTdtCtc110M` library. Both shipped packages use the `parakeet110M` architecture with different capabilities. This work prepares the SDK for other implementations; it does not add Parakeet v3 or advertise another supported model.
+
+The pinned 110M compatibility exports provide a bounded `features` function and one `normalize_` function per window. With `staged_preprocessor: true` in the model config, the runtime computes float32 pre-emphasis, extracts at most 401 raw log-mel frames per prediction, then normalizes the assembled complete window. Encoder/decoder weights, vocabulary and window policies retain the v1.1.0 behavior. [The export script](../Scripts/stage-preprocessor.py) reproduces these additional functions from the original specification without changing `weight.bin`. Bundles without the flag retain the original preprocessor path. Runtime tensor copies honor CoreML's current strides, including padded output rows. Frozen reference points cover every channel throughout all four window sizes.
 
 ## Model metadata and dispatch
 
@@ -75,7 +77,7 @@ Model downloads check cancellation before storage work, between files and before
 
 The default [CI workflow](../.github/workflows/ci.yml) builds and unit-tests on macOS with Xcode 16.0 and 16.4, and runs iOS Simulator tests with Xcode 16.4. It downloads no model weights. `Scripts/ci-ios.sh` selects an installed iPhone runtime compatible with the selected simulator SDK.
 
-The separate [Real-model integration workflow](../.github/workflows/model-integration.yml) is manual (`workflow_dispatch`). It caches only pinned downloaded models, rehashes those files, and runs the serialized real-model suite in release mode on CPU. It does not claim Neural Engine or phone performance. Both workflows need to be pushed before GitHub can execute them.
+The separate [Real-model integration workflow](../.github/workflows/model-integration.yml) runs for pull requests that change runtime sources, tests, the package manifest or the integration workflow. It can also be started manually (`workflow_dispatch`). It caches only pinned downloaded models, rehashes those files, and runs the serialized real-model suite in release mode on CPU. It does not claim Neural Engine or phone performance.
 
 ```bash
 swift test

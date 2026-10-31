@@ -19,8 +19,10 @@ func ctcPipelineMatchesSequentialDecoding() async throws {
                                              ctcFitLastWindow: fit, ctcPipeline: pipeline)
         let first = try runtime.transcribe(samples)
         let again = try runtime.transcribe(samples)
+        #expect(first.ctcText.lowercased().contains("she began her article"), "\(name) dropped the end of the recording")
         #expect(first.ctcText == again.ctcText, "\(name) is not deterministic")
-        #expect(first.ctcLogProbsFlat == again.ctcLogProbsFlat, "\(name) probabilities are not deterministic")
+        let sameProbabilities = first.ctcLogProbsFlat == again.ctcLogProbsFlat
+        #expect(sameProbabilities, "\(name) probabilities are not deterministic")
         texts[name] = first.ctcText
     }
     #expect(texts["pipeline"] == texts["plain"])

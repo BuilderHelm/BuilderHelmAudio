@@ -22,6 +22,8 @@ extension RealModelTests {
                 let url = Bundle.module.url(forResource: name, withExtension: "wav", subdirectory: "Fixtures")!
                 let expected = try direct.transcribe(file: url, includeCtcLogProbs: true)
                 let actual = try await recognizer.transcribe(file: url, includeCtcLogProbabilities: true)
+                #expect(!expected.text.isEmpty, "Published runtime must recognize the speech fixture")
+                #expect(!actual.text.isEmpty, "SDK runtime must recognize the speech fixture")
                 #expect(actual.text == expected.text)
                 #expect(actual.ctcTranscript == expected.ctcText)
                 #expect(actual.tokens.map(\.time) == expected.tokenTimes)

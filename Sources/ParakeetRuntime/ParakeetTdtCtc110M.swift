@@ -9,7 +9,8 @@
 // One encoder call (Neural Engine) serves both decoders. Each window uses the
 // smallest encoder function for short recordings. Adaptive long audio reuses
 // the 20 s function, including its partial tail, and overlaps by 6 s. Windows
-// are stitched at a frame both CTC heads call blank.
+// are stitched at a frame both CTC heads call blank; CTC-only joins also require the
+// stitched tokens near the cut to match one window's own decoding.
 import Accelerate
 import CoreML
 import CryptoKit

@@ -78,6 +78,7 @@ public final class ParakeetTdtCtc110M {
         let encoder_frame_seconds: Double
         let windows: [Window]
         let long_audio: LongAudio
+        let staged_preprocessor: Bool?
         /// Swift decoder weights; absent in v1.0.0 folders, which decode with DecoderJoint/JointBlock.
         let tdt_decoder: DecoderFile?
     }
@@ -85,6 +86,7 @@ public final class ParakeetTdtCtc110M {
     final class Rung {
         let samples: Int
         private let function: String, preprocessorURL: URL, encoderURL: URL, units: MLComputeUnits
+        private let preprocessorFunction: String
         private struct Models { let preprocessor: MLModel; let encoder: MLModel; let audio: MLMultiArray }
         private var models: Models?
         var lastUse: UInt64 = 0
@@ -92,13 +94,15 @@ public final class ParakeetTdtCtc110M {
         var preprocessor: MLModel { models!.preprocessor }
         var encoder: MLModel { models!.encoder }
         var audio: MLMultiArray { models!.audio }
-        init(_ window: Config.Window, preprocessorURL: URL, encoderURL: URL, units: MLComputeUnits) {
+        init(_ window: Config.Window, preprocessorURL: URL, encoderURL: URL, units: MLComputeUnits,
+             stagedPreprocessor: Bool) {
             samples = window.samples
+            preprocessorFunction = stagedPreprocessor ? "normalize_" + window.function : window.function
             function = window.function; self.preprocessorURL = preprocessorURL; self.encoderURL = encoderURL; self.units = units
         }
         func load() throws {
             guard models == nil else { return }
-            models = try Models(preprocessor: ParakeetTdtCtc110M.load(preprocessorURL, .cpuOnly, function),
+            models = try Models(preprocessor: ParakeetTdtCtc110M.load(preprocessorURL, .cpuOnly, preprocessorFunction),
                                 encoder: ParakeetTdtCtc110M.load(encoderURL, units, function),
                                 audio: MLMultiArray(shape: [1, NSNumber(value: samples)], dataType: .float32))
         }
@@ -171,6 +175,8 @@ public final class ParakeetTdtCtc110M {
     let blocks: MLMultiArray              // [1, block, 640]
     let token: MLMultiArray
     let length: MLMultiArray
+    private let featureExtractor: MLModel?
+    private let featureAudio: MLMultiArray?
 
     /// - Parameters:
     ///   - directory: folder with Preprocessor/Encoder bundles, config.json, vocab.json,
@@ -263,11 +269,13 @@ public final class ParakeetTdtCtc110M {
         }
         let coreMLDecoder = !ctcOnly && decoder == nil
         let preloadSamples = ctcLongWindowSamples ?? largest.samples
-        (rungs, decoderJoint, jointBlock) = try Self.withLoadLock(cache) {
+        let staged = config.staged_preprocessor ?? false
+        (rungs, decoderJoint, jointBlock, featureExtractor) = try Self.withLoadLock(cache) {
             try autoreleasepool {
             let preURL = try Self.modelURL(directory, "Preprocessor", cache: cache)
             let encURL = try Self.modelURL(directory, "Encoder", cache: cache)
-            let windows = sorted.map { Rung($0, preprocessorURL: preURL, encoderURL: encURL, units: computeUnits) }
+            let windows = sorted.map { Rung($0, preprocessorURL: preURL, encoderURL: encURL, units: computeUnits,
+                                           stagedPreprocessor: staged) }
             let longest = windows.first { $0.samples == preloadSamples }!
             var preload = [longest]
             if maximumLoadedWindows > 1, let preferredShortWindowSeconds,
@@ -277,9 +285,11 @@ public final class ParakeetTdtCtc110M {
             for (i, window) in preload.enumerated() { try window.load(); window.lastUse = UInt64(i + 1) }
             return (windows,
                     coreMLDecoder ? try Self.load(Self.modelURL(directory, "DecoderJoint", cache: cache), .cpuOnly, nil) : nil,
-                    coreMLDecoder ? try Self.load(Self.modelURL(directory, "JointBlock", cache: cache), .cpuOnly, nil) : nil)
+                    coreMLDecoder ? try Self.load(Self.modelURL(directory, "JointBlock", cache: cache), .cpuOnly, nil) : nil,
+                    staged ? try Self.load(preURL, .cpuOnly, "features") : nil)
             }
         }
+        featureAudio = staged ? try MLMultiArray(shape: [1, 1, 64_512], dataType: .float32) : nil
         longRungIndex = rungs.firstIndex { $0.samples == largest.samples }!
         let shape: [NSNumber]
         if let jointBlock {
@@ -594,13 +604,67 @@ public final class ParakeetTdtCtc110M {
             }
         }
         length[0] = NSNumber(value: n)
-        let pre = try rung.preprocessor.prediction(from: MLDictionaryFeatureProvider(dictionary: [
-            "audio": rung.audio, "audio_length": length]))
+        let pre = try preprocess(rung: rung, audio: rung.audio, audioLength: length)
         let mel32 = pre.featureValue(for: "mel")!.multiArrayValue!
         let mel = try Self.encoderMelInput(mel32)
         let melLength = try MLMultiArray(shape: [1], dataType: .int32)
         melLength[0] = pre.featureValue(for: "mel_length")!.multiArrayValue![0]
         return Prepared(rung: rung, firstFrame: firstFrame, mel: mel, melLength: melLength)
+    }
+
+    /// Bounded DFT predictions followed by normalization over the original complete window.
+    /// Pre-emphasis is evaluated in float32 before each frame's original 512-sample receptive field.
+    func preprocess(rung: Rung, audio: MLMultiArray, audioLength: MLMultiArray) throws -> any MLFeatureProvider {
+        guard let featureExtractor, let featureAudio else {
+            return try rung.preprocessor.prediction(from: MLDictionaryFeatureProvider(dictionary: [
+                "audio": audio, "audio_length": audioLength]))
+        }
+        let count = audioLength[0].intValue
+        let frames = rung.samples / 160 + 1
+        let features = try MLMultiArray(shape: [1, 80, NSNumber(value: frames)], dataType: .float32)
+        try audio.withUnsafeBytes { source in
+            let pcm = source.baseAddress!.assumingMemoryBound(to: Float.self)
+            let pcmStride = audio.strides[1].intValue
+            for firstFrame in stride(from: 0, to: frames, by: 401) {
+                featureAudio.withUnsafeMutableBufferPointer(ofType: Float.self) { destination, strides in
+                    for i in 0..<64_512 {
+                        let sample = firstFrame * 160 + i - 256
+                        let value: Float
+                        if sample >= 0 && sample < count {
+                            let previous: Float = sample > 0 ? pcm[(sample - 1) * pcmStride] : 0
+                            value = pcm[sample * pcmStride] - 0.97 * previous
+                        } else { value = 0 }
+                        destination[i * strides[2]] = value
+                    }
+                }
+                let output = try featureExtractor.prediction(from: MLDictionaryFeatureProvider(dictionary: [
+                    "waveform": featureAudio]))
+                guard let raw = output.featureValue(for: "raw_mel")?.multiArrayValue,
+                      raw.dataType == .float32, raw.shape.map(\.intValue) == [1, 80, 401]
+                else { throw ParakeetError.badConfig("Invalid staged preprocessor features") }
+                withExtendedLifetime(output) {
+                    raw.withUnsafeBytes { bytes in
+                        let row = raw.strides[1].intValue, column = raw.strides[2].intValue
+                        let values = bytes.baseAddress!.assumingMemoryBound(to: Float.self)
+                        features.withUnsafeMutableBufferPointer(ofType: Float.self) { destination, strides in
+                            for channel in 0..<80 {
+                                for frame in 0..<min(401, frames - firstFrame) {
+                                    destination[channel * strides[1] + (firstFrame + frame) * strides[2]] = values[channel * row + frame * column]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let input = try MLDictionaryFeatureProvider(dictionary: ["raw_mel": features, "audio_length": audioLength])
+        let output = try rung.preprocessor.prediction(from: input)
+        return try withExtendedLifetime((features, input, output)) {
+            try MLDictionaryFeatureProvider(dictionary: [
+                "mel": Self.snapshotTensor(output.featureValue(for: "mel")!.multiArrayValue!),
+                "mel_length": Self.snapshotTensor(output.featureValue(for: "mel_length")!.multiArrayValue!),
+            ])
+        }
     }
 
     /// CoreML output rows may be padded (for example, width 801 with row stride 816).

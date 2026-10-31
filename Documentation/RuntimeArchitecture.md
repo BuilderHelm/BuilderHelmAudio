@@ -4,7 +4,7 @@ The public `SpeechRecognizer` owns an internal `AsrRuntime` implementation. Mode
 
 The first adapter wraps the `ParakeetTdtCtc110M` library. Both shipped packages use the `parakeet110M` architecture with different capabilities. This work prepares the SDK for other implementations; it does not add Parakeet v3 or advertise another supported model.
 
-The pinned 110M compatibility exports represent DFT convolutions as height-one 2D operations, adding and removing singleton dimensions around the original arithmetic. Encoder/decoder weights, vocabulary, normalization and window policies retain the v1.1.0 behavior. [The export patch script](../Scripts/lift-preprocessor-dft.py) reproduces the specification change from the original pinned preprocessor. Runtime tensor copies honor CoreML's actual strides, including padded output rows. Frozen mel-feature reference points cover every channel throughout all four exported window sizes.
+The pinned 110M compatibility exports provide a bounded `features` function and one `normalize_` function per window. With `staged_preprocessor: true` in the model config, the runtime computes float32 pre-emphasis, extracts at most 401 raw log-mel frames per prediction, then normalizes the assembled complete window. Encoder/decoder weights, vocabulary and window policies retain the v1.1.0 behavior. [The export script](../Scripts/stage-preprocessor.py) reproduces these additional functions from the original specification without changing `weight.bin`. Bundles without the flag retain the original preprocessor path. Runtime tensor copies honor CoreML's current strides, including padded output rows. Frozen reference points cover every channel throughout all four window sizes.
 
 ## Model metadata and dispatch
 

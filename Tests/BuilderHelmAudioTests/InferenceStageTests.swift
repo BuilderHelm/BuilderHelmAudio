@@ -94,7 +94,7 @@ extension RealModelTests {
             length[0] = NSNumber(value: chunk.count)
             let sameAudio = (0..<320_000).allSatisfy { audio[$0] == prepared.rung.audio[$0] }
             #expect(sameAudio, "\(model.id) window \(start): prepared PCM differs from independent PCM")
-            let reference = try predict(prepared.rung.preprocessor, inputs: ["audio": audio, "audio_length": length])
+            let reference = try runtime.preprocess(rung: prepared.rung, audio: audio, audioLength: length)
             let rawMel = try #require(reference.featureValue(for: "mel")?.multiArrayValue)
             let melDifferences = (0..<rawMel.count).filter { Float(Float16(rawMel[$0].floatValue)) != prepared.mel[$0].floatValue }.count
             let maximumMelError = (0..<rawMel.count).map { abs(Float(Float16(rawMel[$0].floatValue)) - prepared.mel[$0].floatValue) }.max() ?? 0
@@ -153,9 +153,7 @@ extension RealModelTests {
         for window in runtime.config.windows {
             let chunk = samples.prefix(window.samples)
             let prepared = try runtime.prepare(chunk, firstFrame: 0)
-            let reference = try predict(prepared.rung.preprocessor, inputs: [
-                "audio": prepared.rung.audio, "audio_length": runtime.length,
-            ])
+            let reference = try runtime.preprocess(rung: prepared.rung, audio: prepared.rung.audio, audioLength: runtime.length)
             let mel = try #require(reference.featureValue(for: "mel")?.multiArrayValue)
             let converted = try ParakeetTdtCtc110M.encoderMelInput(mel)
             var mismatches = 0
@@ -182,9 +180,7 @@ extension RealModelTests {
         let runtime = try ParakeetTdtCtc110M(directory: directory, computeUnits: realModelTestComputeUnits.coreML,
                                             ctcOnly: true, cacheDirectory: ModelStore.shared.compiledModelsDirectory)
         let prepared = try runtime.prepare(samples[...], firstFrame: 0)
-        let features = try predict(prepared.rung.preprocessor, inputs: [
-            "audio": prepared.rung.audio, "audio_length": runtime.length,
-        ])
+        let features = try runtime.preprocess(rung: prepared.rung, audio: prepared.rung.audio, audioLength: runtime.length)
         let mel = try #require(features.featureValue(for: "mel")?.multiArrayValue)
         let melLength = try #require(features.featureValue(for: "mel_length")?.multiArrayValue)
         print("\(model.id) raw mel: \(tensorSummary(mel)); length=\(melLength[0]), type=\(melLength.dataType)")

@@ -1,7 +1,7 @@
-"""Bound the 110M preprocessor's DFT convolutions without changing window normalization.
+"""Represent the 110M DFT convolutions as height-one 2D convolutions.
 
-Requires coremltools==9.0. Usage: python tile-preprocessor-dft.py source.mlmodel output.mlmodel
-Uses the original weight.bin unchanged. Every DFT frame retains its exact 512-sample input.
+Requires coremltools==9.0. Usage: python lift-preprocessor-dft.py source.mlmodel output.mlmodel
+Weights retain their exact bytes; only singleton dimensions and convolution metadata change.
 """
 import argparse
 from copy import deepcopy
@@ -14,12 +14,12 @@ MIL = ct.proto.MIL_pb2
 
 
 def tensor_type(dtype, shape):
-    result = MIL.ValueType()
-    result.tensorType.dataType = dtype
-    result.tensorType.rank = len(shape)
+    value = MIL.ValueType()
+    value.tensorType.dataType = dtype
+    value.tensorType.rank = len(shape)
     for size in shape:
-        result.tensorType.dimensions.add().constant.size = size
-    return result
+        value.tensorType.dimensions.add().constant.size = size
+    return value
 
 
 def operation(kind, name, shape, inputs=None, dtype=MIL.FLOAT32):
@@ -31,72 +31,65 @@ def operation(kind, name, shape, inputs=None, dtype=MIL.FLOAT32):
     op.attributes["name"].type.CopyFrom(tensor_type(MIL.STRING, []))
     op.attributes["name"].immediateValue.tensor.strings.values.append(name)
     for key, names in (inputs or {}).items():
-        for value in names:
-            op.inputs[key].arguments.add().name = value
+        for name in names:
+            op.inputs[key].arguments.add().name = name
     return op
 
 
-def constant(name, values, shape, dtype=MIL.INT32):
-    op = operation("const", name, shape, dtype=dtype)
-    value = op.attributes["val"]
-    value.type.CopyFrom(op.outputs[0].type)
-    if dtype == MIL.BOOL:
-        value.immediateValue.tensor.bools.values.extend(values)
-    else:
-        value.immediateValue.tensor.ints.values.extend(values)
+def integers(name, values):
+    op = operation("const", name, [len(values)], dtype=MIL.INT32)
+    op.attributes["val"].type.CopyFrom(op.outputs[0].type)
+    op.attributes["val"].immediateValue.tensor.ints.values.extend(values)
     return op
 
 
-def tile(spec):
-    replacements = 0
+def lift(spec):
+    changed = 0
     for function in spec.mlProgram.functions.values():
         for block in function.block_specializations.values():
+            nodes = {v.name: op for op in block.operations for v in op.outputs}
+            for name in ["mel_dft_real", "mel_dft_imag"]:
+                op = nodes[name]
+                shape = [d.constant.size for d in op.outputs[0].type.tensorType.dimensions]
+                if shape != [257, 1, 512]:
+                    raise ValueError(f"Unexpected DFT weight shape: {shape}")
+                shape.insert(2, 1)
+                op.outputs[0].type.CopyFrom(tensor_type(MIL.FLOAT32, shape))
+                op.attributes["val"].type.CopyFrom(op.outputs[0].type)
+            for name in ["real", "imag"]:
+                for key, values in [("strides", [1, 160]), ("pad", [0, 0, 0, 0]), ("dilations", [1, 1])]:
+                    constant = nodes[nodes[name].inputs[key].arguments[0].name]
+                    constant.CopyFrom(integers(constant.outputs[0].name, values))
             result = []
             for original in block.operations:
                 name = original.outputs[0].name
-                if original.type != "conv" or name not in ("real", "imag"):
+                if original.type != "conv" or name not in ["real", "imag"]:
                     result.append(deepcopy(original))
                     continue
-                dimensions = original.outputs[0].type.tensorType.dimensions
-                frames = dimensions[-1].constant.size
-                if frames <= 401:  # Preserve the already bounded four-second function.
-                    result.append(deepcopy(original))
-                    continue
-                channels = dimensions[1].constant.size
-                pieces = []
-                for start in range(0, frames, 400):
-                    count = min(400, frames - start)
-                    prefix = f"{name}_tile_{start}"
-                    first_sample = start * 160
-                    samples = (count - 1) * 160 + 512
+                if name == "real":
+                    shape = [d.constant.size for d in nodes["x"].outputs[0].type.tensorType.dimensions]
+                    shape.insert(2, 1)
                     result.extend([
-                        constant(prefix + "_begin", [0, 0, first_sample], [3]),
-                        constant(prefix + "_end", [1, 1, first_sample + samples], [3]),
-                        operation("slice_by_index", prefix + "_input", [1, 1, samples], {
-                            "x": [original.inputs["x"].arguments[0].name],
-                            "begin": [prefix + "_begin"], "end": [prefix + "_end"],
-                        }),
+                        integers("dft_height_axis", [2]),
+                        operation("expand_dims", "dft_waveform_2d", shape,
+                                  {"x": ["x"], "axes": ["dft_height_axis"]}),
                     ])
-                    conv = deepcopy(original)
-                    conv.outputs[0].name = prefix
-                    conv.outputs[0].type.CopyFrom(tensor_type(MIL.FLOAT32, [1, channels, count]))
-                    conv.attributes["name"].immediateValue.tensor.strings.values[0] = prefix
-                    conv.inputs["x"].arguments[0].name = prefix + "_input"
-                    result.append(conv)
-                    pieces.append(prefix)
-                result.extend([
-                    constant(name + "_tile_axis", [2], []),
-                    constant(name + "_tile_interleave", [False], [], MIL.BOOL),
-                    operation("concat", name, [1, channels, frames], {
-                        "values": pieces, "axis": [name + "_tile_axis"],
-                        "interleave": [name + "_tile_interleave"],
-                    }),
-                ])
-                replacements += 1
+                output_type = deepcopy(original.outputs[0].type)
+                shape = [d.constant.size for d in output_type.tensorType.dimensions]
+                shape.insert(2, 1)
+                conv = deepcopy(original)
+                conv.outputs[0].name = name + "_2d"
+                conv.outputs[0].type.CopyFrom(tensor_type(MIL.FLOAT32, shape))
+                conv.attributes["name"].immediateValue.tensor.strings.values[0] = name + "_2d"
+                conv.inputs["x"].arguments[0].name = "dft_waveform_2d"
+                squeezed = operation("squeeze", name, [], {"x": [name + "_2d"], "axes": ["dft_height_axis"]})
+                squeezed.outputs[0].type.CopyFrom(output_type)
+                result.extend([conv, squeezed])
+                changed += 1
             del block.operations[:]
             block.operations.extend(result)
-    if replacements != 6:
-        raise ValueError(f"Expected six wide DFT convolutions, found {replacements}")
+    if changed != 8:
+        raise ValueError(f"Expected eight DFT convolutions, found {changed}")
     return spec
 
 
@@ -113,7 +106,7 @@ def main():
         raise FileExistsError(args.output)
     if args.mask_probe_output is not None and args.mask_probe_output.exists():
         raise FileExistsError(args.mask_probe_output)
-    spec = tile(ct.utils.load_spec(str(args.source)))
+    spec = lift(ct.utils.load_spec(str(args.source)))
     data = spec.SerializeToString(deterministic=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(data)

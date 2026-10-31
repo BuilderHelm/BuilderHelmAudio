@@ -18,7 +18,7 @@ public struct Transcript: Sendable {
     public let ctcTranscript: String?
     /// Compatibility accessor. Use `ctcTranscript` to distinguish absent CTC from recognized silence.
     public var ctcText: String { ctcTranscript ?? "" }
-    /// TDT tokens with times; empty in CTC mode.
+    /// TDT tokens with times when tokenTimestamps is supported; otherwise empty.
     public let tokens: [TimedToken]
     /// Audio length in seconds.
     public let duration: Double
@@ -30,7 +30,7 @@ public struct Transcript: Sendable {
     public var realTimeFactor: Double { processingTime > 0 ? duration / processingTime : 0 }
 }
 
-/// Where the encoder runs. The Neural Engine is fastest on iPhone and Mac.
+/// Compute devices CoreML may use; actual placement and speed depend on the model and hardware.
 public enum ComputeUnits: Sendable {
     case neuralEngine, gpu, cpu
 
@@ -75,13 +75,16 @@ public final class SpeechRecognizer: @unchecked Sendable {
     public var keywordSpotter: KeywordSpotter { keywordSpotterIfAvailable ?? .unavailable }
 
     private let runtime: any AsrRuntime
-    private let queue = DispatchQueue(label: "BuilderHelmAudio.SpeechRecognizer", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "BuilderHelmAudio.SpeechRecognizer", qos: .userInitiated, autoreleaseFrequency: .workItem)
 
     /// Downloads the model if needed, then loads it. The first load on a device also compiles it for CoreML.
     public static func load(_ model: AsrModel = .parakeetTdtCtc110M, mode: DecodingMode = .tdt,
                             computeUnits: ComputeUnits = .neuralEngine, store: ModelStore = .shared,
                             progress: (@Sendable (DownloadProgress) -> Void)? = nil) async throws -> SpeechRecognizer {
         try Task.checkCancellation()
+        guard !model.repository.isEmpty else {
+            throw BuilderHelmAudioError.invalidModelConfiguration("Experimental v3 is local-only; use SpeechRecognizer(directory:model:)")
+        }
         _ = try RuntimeSelection.resolve(model: model, mode: mode)
         let directory = try await store.download(model, progress: progress)
         let compiled = store.compiledModelsDirectory

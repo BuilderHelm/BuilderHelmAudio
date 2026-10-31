@@ -1,6 +1,6 @@
 import Foundation
 
-/// A speech recognition model published by BuilderHelm on Hugging Face, pinned to an exact revision.
+/// A pinned published recognition model or an explicitly local experimental descriptor.
 public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
     /// A file in the model repository, with the size and SHA-256 it must have after download.
     public struct File: Sendable, Hashable {
@@ -27,7 +27,9 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
     public let files: [File]
 
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.size } }
-    public var description: String { "\(repository) \(version)" }
+    public var description: String { "\(repository.isEmpty ? id : repository) \(version)" }
+    /// Fixed SDK input limit in seconds; nil means no fixed duration limit is imposed by the runtime.
+    public var maxRequestDuration: TimeInterval? { nil }
 
     init(id: String, repository: String, version: String, revision: String, architecture: AsrArchitecture,
          supportedLanguages: [String], capabilities: AsrCapabilities, ctcConfiguration: CtcConfiguration?, files: [File]) {
@@ -109,6 +111,14 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
             File(path: "vocab.json", size: 9_004,
                  sha256: "ecbc3fe1c391a3feea1d1c39f8c15af674bd03cbaf0d0f5de4a564771c16bd16"),
         ])
+
+    /// Unreleased local v3 packages only. Use `SpeechRecognizer(directory:model:)`.
+    /// No remote repository or token/timing/CTC capability is advertised before release validation.
+    public static let experimentalParakeetV3 = AsrModel(
+        id: "parakeet-tdt-0.6b-v3-local", repository: "", version: "experimental", revision: "",
+        architecture: .parakeetV3,
+        supportedLanguages: ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
+        capabilities: [.tdt], ctcConfiguration: nil, files: [])
 
     public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M]
 

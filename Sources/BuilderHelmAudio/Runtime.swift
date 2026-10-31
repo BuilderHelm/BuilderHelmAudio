@@ -63,6 +63,13 @@ struct RuntimeSelection: Sendable {
     static func resolve(model: AsrModel?, mode: DecodingMode) throws -> Self {
         let metadata = model ?? .parakeetTdtCtc110M
         let architecture = metadata.architecture
+        if architecture == .parakeetV3 {
+            guard mode == .tdt, metadata.capabilities == [.tdt], metadata.ctcConfiguration == nil,
+                  Set(metadata.supportedLanguages) == Set(AsrModel.experimentalParakeetV3.supportedLanguages) else {
+                throw BuilderHelmAudioError.invalidModelConfiguration("V3 supports TDT text only; CTC and timestamps are unavailable")
+            }
+            return Self(architecture: .parakeetV3, mode: .tdt, capabilities: [.tdt], ctcConfiguration: nil)
+        }
         guard architecture == .parakeet110M else {
             throw BuilderHelmAudioError.unsupportedArchitecture(architecture.rawValue)
         }
@@ -84,6 +91,8 @@ enum RuntimeFactory {
     static func make(selection: RuntimeSelection, directory: URL, computeUnits: ComputeUnits,
                      cache: URL) throws -> any AsrRuntime {
         switch selection.architecture {
+        case .parakeetV3:
+            return try ParakeetV3Runtime(directory: directory, computeUnits: computeUnits.coreML, cache: cache)
         case .parakeet110M:
             return try Parakeet110MRuntime(directory: directory, selection: selection,
                                           computeUnits: computeUnits.coreML, cache: cache)

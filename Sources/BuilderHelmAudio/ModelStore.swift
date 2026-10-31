@@ -62,7 +62,10 @@ public actor ModelStore {
 
     /// Folder holding the model's files, whether or not they have been downloaded yet.
     public nonisolated func directory(for model: AsrModel) -> URL {
-        root.appendingPathComponent("Models", isDirectory: true)
+        if model.repository.isEmpty || model.revision.isEmpty {
+            return root.appendingPathComponent("LocalOnly", isDirectory: true).appendingPathComponent(model.id, isDirectory: true)
+        }
+        return root.appendingPathComponent("Models", isDirectory: true)
             .appendingPathComponent(model.repository, isDirectory: true)
             .appendingPathComponent(model.revision, isDirectory: true)
     }
@@ -72,6 +75,7 @@ public actor ModelStore {
 
     /// True when every file was verified and still has its pinned size.
     public nonisolated func isDownloaded(_ model: AsrModel) -> Bool {
+        guard !model.repository.isEmpty, !model.revision.isEmpty else { return false }
         let directory = directory(for: model)
         guard let data = try? Data(contentsOf: directory.appendingPathComponent(Self.marker)),
               String(decoding: data, as: UTF8.self) == model.revision else { return false }
@@ -82,6 +86,9 @@ public actor ModelStore {
     @discardableResult
     public func download(_ model: AsrModel, progress: (@Sendable (DownloadProgress) -> Void)? = nil) async throws -> URL {
         try Task.checkCancellation()
+        guard !model.repository.isEmpty, !model.revision.isEmpty else {
+            throw BuilderHelmAudioError.invalidModelConfiguration("Local-only models cannot be downloaded; provide a model directory")
+        }
         let directory = directory(for: model)
         if isDownloaded(model) { return directory }
         try prepareRoot()
@@ -108,6 +115,7 @@ public actor ModelStore {
     /// Re-hashes every downloaded file. Returns false and clears the ready mark if any file changed.
     public func verify(_ model: AsrModel) throws -> Bool {
         try Task.checkCancellation()
+        guard !model.repository.isEmpty, !model.revision.isEmpty else { return false }
         let directory = directory(for: model)
         for file in model.files {
             try Task.checkCancellation()
@@ -122,6 +130,9 @@ public actor ModelStore {
 
     /// Deletes the model's files. Compiled caches are keyed by content and are left in place.
     public func remove(_ model: AsrModel) throws {
+        guard !model.repository.isEmpty, !model.revision.isEmpty else {
+            throw BuilderHelmAudioError.invalidModelConfiguration("Local-only model directories are managed by the caller")
+        }
         let directory = directory(for: model)
         if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
     }
@@ -178,7 +189,10 @@ public actor ModelStore {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try handle.read(upToCount: 4 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+        while try autoreleasepool(invoking: { () throws -> Bool in
+            guard let chunk = try handle.read(upToCount: 4 << 20), !chunk.isEmpty else { return false }
+            hasher.update(data: chunk); return true
+        }) {}
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }

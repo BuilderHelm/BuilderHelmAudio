@@ -1,0 +1,156 @@
+import CoreML
+import Foundation
+import Testing
+@testable import BuilderHelmAudio
+@testable import ParakeetRuntime
+
+@Test func v3SelectionHasTruthfulCapabilitiesAndRejectsCtc() async throws {
+    let model = AsrModel.experimentalParakeetV3
+    let selection = try RuntimeSelection.resolve(model: model, mode: .tdt)
+    #expect(selection.architecture == .parakeetV3)
+    #expect(selection.capabilities == [.tdt])
+    #expect(model.maxRequestDuration == nil)
+    #expect(AsrModel.parakeetTdtCtc110M.maxRequestDuration == nil)
+    #expect(selection.ctcConfiguration == nil)
+    #expect(Set(model.supportedLanguages).count == 25)
+    #expect(!AsrModel.all.contains(model))
+    #expect(throws: BuilderHelmAudioError.self) { try RuntimeSelection.resolve(model: model, mode: .ctc) }
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    await #expect(throws: BuilderHelmAudioError.self) { try await SpeechRecognizer.load(model, store: ModelStore(root: root)) }
+    let store = ModelStore(root: root)
+    await #expect(throws: BuilderHelmAudioError.self) { try await store.download(model) }
+    #expect(!store.isDownloaded(model))
+    #expect(!FileManager.default.fileExists(atPath: root.path))
+}
+
+@Test func v3StateCopyOwnsValuesAndRespectsPaddedStrides() throws {
+    let pointer = UnsafeMutablePointer<Float>.allocate(capacity: 18)
+    pointer.initialize(repeating: .nan, count: 18)
+    for (index, offset) in [0,2,4,9,11,13].enumerated() { pointer[offset] = Float(index + 1) }
+    let source = try MLMultiArray(dataPointer: pointer, shape: [2,1,3], dataType: .float32,
+                                  strides: [9,9,2], deallocator: { $0.assumingMemoryBound(to: Float.self).deallocate() })
+    let target = try MLMultiArray(shape: [2,1,3], dataType: .float32)
+    try ParakeetTdtV3.copy(source, into: target)
+    #expect((0..<6).map { target[$0].intValue } == [1,2,3,4,5,6])
+    pointer[0] = 100
+    #expect(target[0].intValue == 1)
+    pointer[2] = .nan
+    #expect(throws: ParakeetError.self) { try ParakeetTdtV3.copy(source, into: target) }
+}
+
+@Test func v3ArgmaxUsesFirstTieAndChecksNonfiniteValues() throws {
+    let a = try MLMultiArray(shape: [1,1,1,5], dataType: .float32)
+    for (i,value) in [1,4,4,2,3].enumerated() { a[i] = NSNumber(value: value) }
+    #expect(try ParakeetTdtV3.argmax(a, 0..<5) == 1)
+    a[4] = NSNumber(value: Float.nan)
+    #expect(throws: ParakeetError.self) { try ParakeetTdtV3.argmax(a, 0..<5) }
+    #expect(throws: ParakeetError.self) { try ParakeetTdtV3.argmax(a, 0..<6) }
+}
+
+@Test func v3WindowOwnershipHasOneOwnerAtFrameAlignedSeams() {
+    let first = ParakeetTdtV3.Result(text: "", tokenIDs: [1,2,3], emissionFrames: [162,163,187])
+    let second = ParakeetTdtV3.Result(text: "", tokenIDs: [4,5,6,7], emissionFrames: [0,24,25,26])
+    var ids: [Int] = [], frames: [Int] = []
+    ParakeetTdtV3.appendOwned(first, start: 0, last: false, ids: &ids, frames: &frames)
+    ParakeetTdtV3.appendOwned(second, start: 176640, last: true, ids: &ids, frames: &frames)
+    #expect(ids == [1,6,7])
+    #expect(frames == [162,163,164])
+}
+
+@Test func v3AllowsAnExplicitSingleWindowRequestBudget() throws {
+    try ParakeetTdtV3.validateSampleCount(240000, allowLongAudio: false)
+    #expect(throws: ParakeetError.self) { try ParakeetTdtV3.validateSampleCount(240001, allowLongAudio: false) }
+    try ParakeetTdtV3.validateSampleCount(240001, allowLongAudio: true)
+}
+
+@Test func v3LocalDescriptorCannotVerifyOrRemoveSharedModelStorage() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let preserved = root.appendingPathComponent("Models/preserved.txt")
+    try FileManager.default.createDirectory(at: preserved.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("existing model".utf8).write(to: preserved)
+    let store = ModelStore(root: root)
+    #expect(try await !store.verify(.experimentalParakeetV3))
+    await #expect(throws: BuilderHelmAudioError.self) { try await store.remove(.experimentalParakeetV3) }
+    #expect(try Data(contentsOf: preserved) == Data("existing model".utf8))
+}
+
+@Test func v3TokenizerPreservesSourceUnknownAndWhitespaceSemantics() {
+    let pieces = ["<unk>", "▁the", "▁", ","]
+    #expect(ParakeetTdtV3.detokenize([0], pieces: pieces, punctuation: [","]) == " ⁇ ")
+    #expect(ParakeetTdtV3.detokenize([1,0], pieces: pieces, punctuation: [","]) == "the ⁇ ")
+    #expect(ParakeetTdtV3.detokenize([0,1], pieces: pieces, punctuation: [","]) == " ⁇  the")
+    #expect(ParakeetTdtV3.detokenize([2,2], pieces: pieces, punctuation: [","]) == " ")
+    #expect(ParakeetTdtV3.detokenize([1,2,3], pieces: pieces, punctuation: [","]) == "the,")
+}
+
+@Test func v3PausePlannerCutsInAQuietRunWithoutDiscardingSamples() {
+    var audio = [Float](repeating: 0.2, count: 240001)
+    for i in 160000..<164800 { audio[i] = 0 }
+    let plan = ParakeetTdtV3.planWindow(audio, left: 0)
+    #expect(plan.count == 240000)
+    #expect((160000..<164800).contains(plan.advance))
+    #expect(plan.advance % 1280 == 0)
+    #expect(plan.right == plan.advance)
+    #expect(plan.nextLeft == 0)
+    let next = ParakeetTdtV3.planWindow(Array(audio.dropFirst(plan.advance)), left: 0)
+    #expect(plan.advance + next.count == audio.count)
+}
+
+@Test func v3PausePlannerKeepsOverlapForContinuousSpeechAndIgnoresTinyGaps() {
+    var audio = [Float](repeating: 0.2, count: 240001)
+    for i in 160000..<160800 { audio[i] = 0 }
+    let plan = ParakeetTdtV3.planWindow(audio, left: 0)
+    #expect(plan.count == 240000)
+    #expect(plan.advance == 176640)
+    #expect(plan.right == plan.advance + plan.nextLeft)
+    #expect(plan.nextLeft == 32000)
+    let tail = ParakeetTdtV3.planWindow([Float](repeating: 0, count: 100), left: 32000)
+    #expect(tail.count == 100)
+}
+
+@Test func v3PausePlannerIsGainRelativeAndHasBoundedForwardProgress() {
+    for gain: Float in [0.01, 0.1, 1] {
+        var audio = [Float](repeating: gain, count: 240001)
+        for i in 172800..<177920 { audio[i] = gain * 0.001 }
+        let plan = ParakeetTdtV3.planWindow(audio, left: 32000)
+        #expect((128000...224000).contains(plan.advance))
+        #expect((172800..<177920).contains(plan.advance))
+        #expect(plan.advance % 1280 == 0)
+    }
+}
+
+@Test func v3LongWindowPlannerUsesContextAndKeepsFrameAlignedOwnership() {
+    var samples = [Float](repeating: 0.2, count: 480001)
+    let continuous = ParakeetTdtV3.planWindow(samples, left: 0, windowSamples: 480000)
+    #expect(continuous.count == 480000)
+    #expect(continuous.advance % 1280 == 0)
+    #expect(continuous.right == continuous.advance + continuous.nextLeft)
+    #expect(continuous.right < continuous.count)
+    for i in 400000..<405120 { samples[i] = 0 }
+    let paused = ParakeetTdtV3.planWindow(samples, left: 0, windowSamples: 480000)
+    #expect(paused.count == 480000)
+    #expect((400000..<405120).contains(paused.advance))
+    #expect(paused.advance % 1280 == 0)
+    #expect(paused.right == paused.advance)
+    #expect(paused.nextLeft == 0)
+}
+
+@Test func v3ConsensusJoinPreservesWordsWithShiftedEmissionFrames() {
+    let a = ParakeetTdtV3.Result(text:"",tokenIDs:[1,2,3,4,5,6],emissionFrames:[90,97,101,103,105,108])
+    let b = ParakeetTdtV3.Result(text:"",tokenIDs:[3,4,5,6,7],emissionFrames:[0,2,4,7,10])
+    let cut = ParakeetTdtV3.join(a,previousStart:0,previousFirst:0,next:b,nextStart:100*1280,seam:100*1280)
+    let merged = Array(a.tokenIDs[..<cut.previousEnd])+Array(b.tokenIDs[cut.nextBegin...])
+    #expect(merged == [1,2,3,4,5,6,7])
+}
+
+@Test func v3ConsensusJoinRejectsMatchingTextAtDifferentAudioTimes() {
+    let a = ParakeetTdtV3.Result(text:"",tokenIDs:[1,2,3],emissionFrames:[10,11,12])
+    let b = ParakeetTdtV3.Result(text:"",tokenIDs:[1,2,3],emissionFrames:[0,1,2])
+    let cut = ParakeetTdtV3.join(a,previousStart:0,previousFirst:0,next:b,nextStart:100*1280,seam:100*1280)
+    #expect(cut.previousEnd == 3)
+    #expect(cut.nextBegin == 0)
+    let empty = ParakeetTdtV3.Result(text:"",tokenIDs:[],emissionFrames:[])
+    let silence = ParakeetTdtV3.join(a,previousStart:0,previousFirst:0,next:empty,nextStart:100*1280,seam:100*1280)
+    #expect(silence.previousEnd == 3)
+}

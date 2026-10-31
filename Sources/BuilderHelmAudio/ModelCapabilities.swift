@@ -6,6 +6,8 @@ public struct AsrArchitecture: RawRepresentable, Hashable, Sendable {
     public let rawValue: String
     public init(rawValue: String) { self.rawValue = rawValue }
 
+    public static let parakeetV3 = Self(rawValue: "parakeet-tdt-0.6b-v3")
+
     public static let parakeet110M = Self(rawValue: "parakeet-tdt-ctc-110m")
 }
 

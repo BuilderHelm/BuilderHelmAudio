@@ -30,6 +30,19 @@ extension RealModelTests {
             #expect(sameAudio, "\(model.id) window \(start): prepared PCM differs from independent PCM")
             let reference = try predict(prepared.rung.preprocessor, inputs: ["audio": audio, "audio_length": length])
             let rawMel = try #require(reference.featureValue(for: "mel")?.multiArrayValue)
+            let diagnosticName = "\(model.id)-\(start)"
+            try captureTensor(prepared.audio, name: diagnosticName + "-pcm-prepared")
+            try captureTensor(audio, name: diagnosticName + "-pcm-reference")
+            try captureTensor(prepared.audioLength, name: diagnosticName + "-length-prepared")
+            try captureTensor(length, name: diagnosticName + "-length-reference")
+            try captureTensor(prepared.mel, name: diagnosticName + "-mel-prepared")
+            try captureTensor(rawMel, name: diagnosticName + "-mel-reference")
+            let options = MLPredictionOptions()
+            options.outputBackings = ["mel": try MLMultiArray(shape: rawMel.shape, dataType: rawMel.dataType),
+                                      "mel_length": try MLMultiArray(shape: [1], dataType: .int32)]
+            let backedOutput = try predict(prepared.rung.preprocessor, inputs: ["audio": audio, "audio_length": length], options: options)
+            let backedMel = try #require(backedOutput.featureValue(for: "mel")?.multiArrayValue)
+            try captureTensor(backedMel, name: diagnosticName + "-mel-backed")
             let melDifferences = (0..<rawMel.count).filter { Float(Float16(rawMel[$0].floatValue)) != prepared.mel[$0].floatValue }.count
             let maximumMelError = (0..<rawMel.count).map { abs(Float(Float16(rawMel[$0].floatValue)) - prepared.mel[$0].floatValue) }.max() ?? 0
             #expect(prepared.audioLength[0] == length[0])
@@ -48,6 +61,9 @@ extension RealModelTests {
             let repeatDifferences = zip(flat, repeated).filter { $0 != $1 }.count
             #expect(repeatDifferences == 0, "\(model.id) window \(start): \(repeatDifferences) CTC values changed on repeated prediction")
             let other = try independent.prepare(chunk, firstFrame: start / 1280, forcedWindowSamples: 320_000)
+            try captureTensor(other.audio, name: diagnosticName + "-pcm-independent")
+            try captureTensor(other.mel, name: diagnosticName + "-mel-independent")
+            try captureTensor(prepared.mel, name: diagnosticName + "-mel-after-encoder")
             let instanceMelDifferences = (0..<prepared.mel.count).filter { prepared.mel[$0] != other.mel[$0] }.count
             #expect(instanceMelDifferences == 0, "\(model.id) window \(start): mel differs across runtime instances")
             let otherEncoded = try independent.runEncoder(other)
@@ -143,8 +159,39 @@ extension RealModelTests {
     }
 }
 
-private func predict(_ model: MLModel, inputs: [String: Any]) throws -> any MLFeatureProvider {
-    try model.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs))
+private func predict(_ model: MLModel, inputs: [String: Any], options: MLPredictionOptions = MLPredictionOptions()) throws -> any MLFeatureProvider {
+    try model.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs), options: options)
+}
+
+/// Optional CI evidence for diagnosing OS-specific tensor layouts, using only bundled test audio.
+private func captureTensor(_ tensor: MLMultiArray, name: String) throws {
+    guard let path = ProcessInfo.processInfo.environment["BUILDERHELM_STAGE_DIAGNOSTICS"] else { return }
+    let directory = URL(fileURLWithPath: path, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let scalar = (0..<tensor.count).map { tensor[$0].floatValue }
+    let shape = tensor.shape.map(\.intValue), initialStrides = tensor.strides.map(\.intValue)
+    var scopedStrides: [Int] = []
+    let scoped: [Float] = tensor.withUnsafeBytes { bytes in
+        scopedStrides = tensor.strides.map(\.intValue)
+        return (0..<tensor.count).map { index in
+            var remainder = index, offset = 0
+            for axis in shape.indices.reversed() {
+                offset += (remainder % shape[axis]) * scopedStrides[axis]
+                remainder /= shape[axis]
+            }
+            switch tensor.dataType {
+            case .float16: return Float(bytes.baseAddress!.assumingMemoryBound(to: Float16.self)[offset])
+            case .float32: return bytes.baseAddress!.assumingMemoryBound(to: Float.self)[offset]
+            case .int32: return Float(bytes.baseAddress!.assumingMemoryBound(to: Int32.self)[offset])
+            default: return .nan
+            }
+        }
+    }
+    let metadata: [String: Any] = ["shape": shape, "initialStrides": initialStrides, "scopedStrides": scopedStrides,
+                                   "dataType": tensor.dataType.rawValue]
+    try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]).write(to: directory.appendingPathComponent(name + ".json"))
+    try scalar.withUnsafeBytes { try Data($0).write(to: directory.appendingPathComponent(name + "-scalar.f32")) }
+    try scoped.withUnsafeBytes { try Data($0).write(to: directory.appendingPathComponent(name + "-scoped.f32")) }
 }
 
 private func tensorSummary(_ array: MLMultiArray) -> String {

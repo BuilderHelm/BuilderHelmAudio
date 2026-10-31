@@ -43,4 +43,13 @@ jobs:
           path: ~/Library/Application Support/BuilderHelmAudio/Models
           key: bhaudio-models-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Sources/BuilderHelmAudio/AsrModel.swift') }}
       - name: Integration tests (rehash cached models, then run real inference)
+        env:
+          BUILDERHELM_STAGE_DIAGNOSTICS: ${{ runner.temp }}/inference-stages
         run: swift test -c release --filter RealModelTests
+      - name: Preserve inference stage evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: inference-stages
+          path: ${{ runner.temp }}/inference-stages
+          retention-days: 3

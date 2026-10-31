@@ -29,9 +29,14 @@ extension RealModelTests {
                 #expect(actual.tokens.map(\.time) == expected.tokenTimes)
                 #expect(actual.tokens.map(\.text) == expected.tokens.map { vocabulary[$0].replacingOccurrences(of: "▁", with: " ") })
                 let probabilities = try #require(actual.ctcLogProbabilities)
-                #expect(probabilities.values == expected.ctcLogProbsFlat)
+                let sameProbabilities = probabilities.values == expected.ctcLogProbsFlat
+                #expect(sameProbabilities)
+                #expect(greedyText(probabilities, vocabulary: vocabulary) == actual.ctcText,
+                        "CTC text must agree with its returned probability frames")
                 let phrases = ["fox", "Neural Engine", "Maria", "lighthouse", "zebra"]
                 let originalProbabilities = CtcLogProbabilities(values: try #require(expected.ctcLogProbsFlat))
+                #expect(greedyText(originalProbabilities, vocabulary: vocabulary) == expected.ctcText,
+                        "Reference CTC text must agree with its returned probability frames")
                 let priorHits = spotter.detect(phrases, in: originalProbabilities)
                 let hits = recognizer.keywordSpotter.detect(phrases, in: probabilities)
                 #expect(hits.map(\.keyword) == priorHits.map(\.keyword))
@@ -41,4 +46,19 @@ extension RealModelTests {
             }
         }
     }
+}
+
+private func greedyText(_ probabilities: CtcLogProbabilities, vocabulary: [String]) -> String {
+    let classes = probabilities.configuration.classCount, blank = probabilities.configuration.blank
+    var previous = blank, pieces: [String] = []
+    probabilities.values.withUnsafeBufferPointer { values in
+        for frame in 0..<probabilities.frameCount {
+            let start = frame * classes
+            var best = 0
+            for token in 1..<classes where values[start + token] > values[start + best] { best = token }
+            if best != blank && best != previous { pieces.append(vocabulary[best < blank ? best : best - 1]) }
+            previous = best
+        }
+    }
+    return pieces.joined().replacingOccurrences(of: "▁", with: " ").trimmingCharacters(in: .whitespaces)
 }

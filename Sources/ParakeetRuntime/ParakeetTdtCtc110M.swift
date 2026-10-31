@@ -578,17 +578,23 @@ public final class ParakeetTdtCtc110M {
         let n = samples.count
         let rung = forcedWindowSamples.flatMap { size in rungs.first { $0.samples == size } } ?? (reuseLargestWindow ? longRung : (rungs.first { $0.samples >= n } ?? longRung))
         try ensureLoaded(rung, protecting: busy)
-        let audio = rung.audio.dataPointer.assumingMemoryBound(to: Float.self)
-        samples.withUnsafeBufferPointer { audio.update(from: $0.baseAddress!, count: n) }
-        if n < rung.samples { (audio + n).update(repeating: 0, count: rung.samples - n) }
-        length.dataPointer.assumingMemoryBound(to: Int32.self)[0] = Int32(n)
+        rung.audio.withUnsafeMutableBufferPointer(ofType: Float.self) { audio, strides in
+            let stride = strides[1]
+            if stride == 1 {
+                samples.withUnsafeBufferPointer { audio.baseAddress!.update(from: $0.baseAddress!, count: n) }
+                if n < rung.samples { (audio.baseAddress! + n).update(repeating: 0, count: rung.samples - n) }
+            } else {
+                for (i, sample) in samples.enumerated() { audio[i * stride] = sample }
+                for i in n..<rung.samples { audio[i * stride] = 0 }
+            }
+        }
+        length[0] = NSNumber(value: n)
         let pre = try rung.preprocessor.prediction(from: MLDictionaryFeatureProvider(dictionary: [
             "audio": rung.audio, "audio_length": length]))
         let mel32 = pre.featureValue(for: "mel")!.multiArrayValue!
         let mel = try Self.encoderMelInput(mel32)
         let melLength = try MLMultiArray(shape: [1], dataType: .int32)
-        melLength.dataPointer.assumingMemoryBound(to: Int32.self)[0] =
-            pre.featureValue(for: "mel_length")!.multiArrayValue!.dataPointer.assumingMemoryBound(to: Int32.self)[0]
+        melLength[0] = pre.featureValue(for: "mel_length")!.multiArrayValue![0]
         return Prepared(rung: rung, firstFrame: firstFrame, mel: mel, melLength: melLength)
     }
 
@@ -601,21 +607,25 @@ public final class ParakeetTdtCtc110M {
         }
         let mel = try MLMultiArray(shape: features.shape, dataType: .float16)
         let channels = features.shape[1].intValue, frames = features.shape[2].intValue
-        let sourceRow = features.strides[1].intValue, sourceColumn = features.strides[2].intValue
-        let targetRow = mel.strides[1].intValue, targetColumn = mel.strides[2].intValue
-        let destination = mel.dataPointer.assumingMemoryBound(to: Float16.self)
-        if features.dataType == .float32 {
-            let source = features.dataPointer.assumingMemoryBound(to: Float.self)
-            for channel in 0..<channels {
-                for frame in 0..<frames {
-                    destination[channel * targetRow + frame * targetColumn] = Float16(source[channel * sourceRow + frame * sourceColumn])
-                }
-            }
-        } else {
-            let source = features.dataPointer.assumingMemoryBound(to: Float16.self)
-            for channel in 0..<channels {
-                for frame in 0..<frames {
-                    destination[channel * targetRow + frame * targetColumn] = source[channel * sourceRow + frame * sourceColumn]
+        features.withUnsafeBytes { bytes in
+            // Buffer access can materialize a new backing layout: read strides inside the scope.
+            let sourceRow = features.strides[1].intValue, sourceColumn = features.strides[2].intValue
+            mel.withUnsafeMutableBufferPointer(ofType: Float16.self) { destination, strides in
+                let targetRow = strides[1], targetColumn = strides[2]
+                if features.dataType == .float32 {
+                    let source = bytes.baseAddress!.assumingMemoryBound(to: Float.self)
+                    for channel in 0..<channels {
+                        for frame in 0..<frames {
+                            destination[channel * targetRow + frame * targetColumn] = Float16(source[channel * sourceRow + frame * sourceColumn])
+                        }
+                    }
+                } else {
+                    let source = bytes.baseAddress!.assumingMemoryBound(to: Float16.self)
+                    for channel in 0..<channels {
+                        for frame in 0..<frames {
+                            destination[channel * targetRow + frame * targetColumn] = source[channel * sourceRow + frame * sourceColumn]
+                        }
+                    }
                 }
             }
         }
@@ -626,7 +636,7 @@ public final class ParakeetTdtCtc110M {
     func runEncoder(_ job: Prepared) throws -> Encoded {
         let out = try job.rung.encoder.prediction(from: MLDictionaryFeatureProvider(dictionary: [
             "mel": job.mel, "mel_length": job.melLength]))
-        let frames = Int(out.featureValue(for: "encoder_length")!.multiArrayValue!.dataPointer.assumingMemoryBound(to: Int32.self)[0])
+        let frames = out.featureValue(for: "encoder_length")!.multiArrayValue![0].intValue
         let projection = out.featureValue(for: "encoder_proj")?.multiArrayValue
         guard !decodesTdt || projection != nil else { throw ParakeetError.badConfig("TDT decoding requires encoder_proj") }
         return Encoded(firstFrame: job.firstFrame, frames: frames, ctc: out.featureValue(for: "ctc_logprobs")!.multiArrayValue!,
@@ -641,13 +651,15 @@ public final class ParakeetTdtCtc110M {
 
     /// Row r of a [1, T, C] float16/float32 array.
     static func row(_ a: MLMultiArray, _ r: Int) -> [Float] {
-        let c = a.shape[2].intValue, rs = a.strides[1].intValue, cs = a.strides[2].intValue
-        if a.dataType == .float16 {
-            let p = a.dataPointer.assumingMemoryBound(to: Float16.self)
+        a.withUnsafeBytes { bytes in
+            let c = a.shape[2].intValue, rs = a.strides[1].intValue, cs = a.strides[2].intValue
+            if a.dataType == .float16 {
+                let p = bytes.baseAddress!.assumingMemoryBound(to: Float16.self)
+                return (0..<c).map { Float(p[r * rs + $0 * cs]) }
+            }
+            let p = bytes.baseAddress!.assumingMemoryBound(to: Float.self)
             return (0..<c).map { Float(p[r * rs + $0 * cs]) }
         }
-        let p = a.dataPointer.assumingMemoryBound(to: Float.self)
-        return (0..<c).map { p[r * rs + $0 * cs] }
     }
 
     /// Frames each window keeps: windows meet at the overlap frame both CTC heads call most blank.
@@ -701,27 +713,36 @@ public final class ParakeetTdtCtc110M {
     // MARK: - TDT greedy decoding
 
     func fill(_ w: Window, at t: Int) {
-        let dst = blocks.dataPointer.assumingMemoryBound(to: Float.self)
         let p = w.projection!
-        let rs = p.strides[1].intValue, cs = p.strides[2].intValue
-        for j in 0..<block {
-            let out = dst + j * hidden
-            guard t + j < w.frames else { out.update(repeating: 0, count: hidden); continue }
-            if p.dataType == .float16 {
-                let src = p.dataPointer.assumingMemoryBound(to: Float16.self)
-                for k in 0..<hidden { out[k] = Float(src[(t + j) * rs + k * cs]) }
-            } else {
-                let src = p.dataPointer.assumingMemoryBound(to: Float.self)
-                for k in 0..<hidden { out[k] = src[(t + j) * rs + k * cs] }
+        p.withUnsafeBytes { source in
+            let rs = p.strides[1].intValue, cs = p.strides[2].intValue
+            blocks.withUnsafeMutableBufferPointer(ofType: Float.self) { destination, strides in
+                for j in 0..<block {
+                    for k in 0..<hidden {
+                        let index = j * strides[1] + k * strides[2]
+                        if t + j >= w.frames { destination[index] = 0 }
+                        else if p.dataType == .float16 {
+                            destination[index] = Float(source.baseAddress!.assumingMemoryBound(to: Float16.self)[(t + j) * rs + k * cs])
+                        } else {
+                            destination[index] = source.baseAddress!.assumingMemoryBound(to: Float.self)[(t + j) * rs + k * cs]
+                        }
+                    }
+                }
             }
         }
     }
 
     static func decisions(_ out: MLFeatureProvider, count: Int) -> ([Int], [Int]) {
         let tk = out.featureValue(for: "tokens")!.multiArrayValue!, du = out.featureValue(for: "durations")!.multiArrayValue!
-        let tp = tk.dataPointer.assumingMemoryBound(to: Int32.self), dp = du.dataPointer.assumingMemoryBound(to: Int32.self)
-        let ts = tk.strides.last!.intValue, ds = du.strides.last!.intValue
-        return ((0..<count).map { Int(tp[$0 * ts]) }, (0..<count).map { Int(dp[$0 * ds]) })
+        let tokens = tk.withUnsafeBufferPointer(ofType: Int32.self) { buffer in
+            let stride = tk.strides.last!.intValue
+            return (0..<count).map { Int(buffer[$0 * stride]) }
+        }
+        let durations = du.withUnsafeBufferPointer(ofType: Int32.self) { buffer in
+            let stride = du.strides.last!.intValue
+            return (0..<count).map { Int(buffer[$0 * stride]) }
+        }
+        return (tokens, durations)
     }
 
     /// NeMo-equivalent greedy TDT over one window, keeping tokens from frames keepFrom..<keepTo.
@@ -778,28 +799,30 @@ public final class ParakeetTdtCtc110M {
 
     /// The first `rows` frames of a [1, T, 640] float16/float32 array as contiguous float32.
     static func contiguous(_ a: MLMultiArray, rows: Int) -> [Float] {
-        let c = a.shape[2].intValue, rs = a.strides[1].intValue, cs = a.strides[2].intValue
-        return [Float](unsafeUninitializedCapacity: rows * c) { out, initialized in
-            if a.dataType == .float16 {
-                var converted = false
-                if cs == 1 && rows > 0 {
-                    var source = vImage_Buffer(data: a.dataPointer, height: vImagePixelCount(rows), width: vImagePixelCount(c), rowBytes: rs * 2)
-                    var destination = vImage_Buffer(data: out.baseAddress!, height: vImagePixelCount(rows), width: vImagePixelCount(c), rowBytes: c * 4)
-                    converted = vImageConvert_Planar16FtoPlanarF(&source, &destination, vImage_Flags(kvImageNoFlags)) == kvImageNoError
-                }
-                if !converted {
-                    let src = a.dataPointer.assumingMemoryBound(to: Float16.self)
-                    for r in 0..<rows { for k in 0..<c { out[r * c + k] = Float(src[r * rs + k * cs]) } }
-                }
-            } else {
-                let src = a.dataPointer.assumingMemoryBound(to: Float.self)
-                if cs == 1 {
-                    for r in 0..<rows { out.baseAddress!.advanced(by: r * c).update(from: src + r * rs, count: c) }
+        a.withUnsafeBytes { bytes in
+            let c = a.shape[2].intValue, rs = a.strides[1].intValue, cs = a.strides[2].intValue
+            return [Float](unsafeUninitializedCapacity: rows * c) { out, initialized in
+                if a.dataType == .float16 {
+                    var converted = false
+                    if cs == 1 && rows > 0 {
+                        var source = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: bytes.baseAddress!), height: vImagePixelCount(rows), width: vImagePixelCount(c), rowBytes: rs * 2)
+                        var destination = vImage_Buffer(data: out.baseAddress!, height: vImagePixelCount(rows), width: vImagePixelCount(c), rowBytes: c * 4)
+                        converted = vImageConvert_Planar16FtoPlanarF(&source, &destination, vImage_Flags(kvImageNoFlags)) == kvImageNoError
+                    }
+                    if !converted {
+                        let src = bytes.baseAddress!.assumingMemoryBound(to: Float16.self)
+                        for r in 0..<rows { for k in 0..<c { out[r * c + k] = Float(src[r * rs + k * cs]) } }
+                    }
                 } else {
-                    for r in 0..<rows { for k in 0..<c { out[r * c + k] = src[r * rs + k * cs] } }
+                    let src = bytes.baseAddress!.assumingMemoryBound(to: Float.self)
+                    if cs == 1 {
+                        for r in 0..<rows { out.baseAddress!.advanced(by: r * c).update(from: src + r * rs, count: c) }
+                    } else {
+                        for r in 0..<rows { for k in 0..<c { out[r * c + k] = src[r * rs + k * cs] } }
+                    }
                 }
+                initialized = rows * c
             }
-            initialized = rows * c
         }
     }
 
@@ -808,14 +831,14 @@ public final class ParakeetTdtCtc110M {
     func tdtCoreML(_ w: Window, keepFrom: Int, keepTo: Int) throws -> ([Int], [Int]) {
         var h = try MLMultiArray(shape: [1, 1, NSNumber(value: hidden)], dataType: .float32)
         var c = try MLMultiArray(shape: [1, 1, NSNumber(value: hidden)], dataType: .float32)
-        h.dataPointer.assumingMemoryBound(to: Float.self).update(repeating: 0, count: hidden)
-        c.dataPointer.assumingMemoryBound(to: Float.self).update(repeating: 0, count: hidden)
+        h.withUnsafeMutableBufferPointer(ofType: Float.self) { buffer, _ in buffer.initialize(repeating: 0) }
+        c.withUnsafeMutableBufferPointer(ofType: Float.self) { buffer, _ in buffer.initialize(repeating: 0) }
         var pred: MLMultiArray? = nil
         var tokens: [Int] = [], durations: [Int] = []
         var blockStart = 0
         return try walk(frames: w.frames, keepFrom: keepFrom, keepTo: keepTo, emit: { k, t in
             fill(w, at: t)
-            token.dataPointer.assumingMemoryBound(to: Int32.self)[0] = Int32(k)
+            token[0] = NSNumber(value: k)
             let out = try decoderJoint!.prediction(from: MLDictionaryFeatureProvider(dictionary: [
                 "token": token, "h": h, "c": c, "encoder_frames": blocks]))
             pred = out.featureValue(for: "pred_proj")!.multiArrayValue!

@@ -1,9 +1,9 @@
 import CoreML
+import CoreVideo
 import Testing
 @testable import ParakeetRuntime
 
-@Test(arguments: [false, true])
-func melConversionSkipsPaddingAndPreservesLogicalValues(halfPrecision: Bool) throws {
+private func paddedFeatures(halfPrecision: Bool) throws -> (MLMultiArray, [Float]) {
     let count = 16
     let bytes = count * (halfPrecision ? MemoryLayout<Float16>.stride : MemoryLayout<Float>.stride)
     let storage = UnsafeMutableRawPointer.allocate(byteCount: bytes, alignment: MemoryLayout<Float>.alignment)
@@ -25,6 +25,12 @@ func melConversionSkipsPaddingAndPreservesLogicalValues(halfPrecision: Bool) thr
             source[[0, NSNumber(value: channel), NSNumber(value: frame)]] = NSNumber(value: values[channel * 3 + frame])
         }
     }
+    return (source, values)
+}
+
+@Test(arguments: [false, true])
+func melConversionSkipsPaddingAndPreservesLogicalValues(halfPrecision: Bool) throws {
+    let (source, values) = try paddedFeatures(halfPrecision: halfPrecision)
     let result = try ParakeetTdtCtc110M.encoderMelInput(source)
     #expect(result.shape == source.shape)
     #expect(result.dataType == .float16)
@@ -33,6 +39,38 @@ func melConversionSkipsPaddingAndPreservesLogicalValues(halfPrecision: Bool) thr
             let actual = result[[0, NSNumber(value: channel), NSNumber(value: frame)]].floatValue
             #expect(actual == Float(Float16(values[channel * 3 + frame])))
         }
+    }
+}
+
+@Test(arguments: [false, true])
+func tensorReadsPreservePaddedRowsAndColumns(halfPrecision: Bool) throws {
+    let (source, original) = try paddedFeatures(halfPrecision: halfPrecision)
+    let expected = halfPrecision ? original.map { Float(Float16($0)) } : original
+    #expect(ParakeetTdtCtc110M.contiguous(source, rows: 2) == expected)
+    #expect(ParakeetTdtCtc110M.row(source, 0) == Array(expected[0..<3]))
+    #expect(ParakeetTdtCtc110M.row(source, 1) == Array(expected[3..<6]))
+}
+
+@Test func pixelBufferTensorReadsUseTheCurrentBackingLayout() throws {
+    let width = 1025, rows = 3
+    let attributes = [kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+                      kCVPixelBufferBytesPerRowAlignmentKey as String: 64] as [String: Any]
+    var pixelBuffer: CVPixelBuffer?
+    let status = CVPixelBufferCreate(kCFAllocatorDefault, width, rows, kCVPixelFormatType_OneComponent16Half,
+                                    attributes as CFDictionary, &pixelBuffer)
+    try #require(status == kCVReturnSuccess)
+    let buffer = try #require(pixelBuffer)
+    let values = (0..<(width * rows)).map { Float(Float16(Float($0 % 127) / 16 - 4)) }
+    try #require(CVPixelBufferLockBaseAddress(buffer, []) == kCVReturnSuccess)
+    let pointer = try #require(CVPixelBufferGetBaseAddress(buffer)).assumingMemoryBound(to: Float16.self)
+    let stride = CVPixelBufferGetBytesPerRow(buffer) / MemoryLayout<Float16>.stride
+    for r in 0..<rows { for c in 0..<width { pointer[r * stride + c] = Float16(values[r * width + c]) } }
+    CVPixelBufferUnlockBaseAddress(buffer, [])
+    let array = MLMultiArray(pixelBuffer: buffer, shape: [1, NSNumber(value: rows), NSNumber(value: width)])
+    for _ in 0..<3 {
+        let equal = ParakeetTdtCtc110M.contiguous(array, rows: rows) == values
+        #expect(equal)
+        #expect(ParakeetTdtCtc110M.row(array, 1) == Array(values[width..<(width * 2)]))
     }
 }
 

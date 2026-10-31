@@ -6,67 +6,6 @@ import Testing
 @testable import ParakeetRuntime
 
 extension RealModelTests {
-    @Test(arguments: AsrModel.all)
-    func arithmeticMaskMatchesFrozenFeatures(model: AsrModel) async throws {
-        let reference = try loadStageReference()
-        let (audio, length, _) = try preprocessorProbeInput(count: reference.sampleCount)
-        let directory = try await ModelStore.shared.download(model)
-        traceProbe("\(model.id) loading arithmetic-mask candidate")
-        let candidate = try loadPreprocessorProbe(directory: directory, resource: "preprocessor-multiply-mask-probe")
-        traceProbe("\(model.id) loaded arithmetic-mask candidate")
-        let points = reference.stages["mel"]!
-        for iteration in 0..<3 {
-            let output = try predict(candidate, inputs: ["audio": audio, "audio_length": length])
-            let mel = try #require(output.featureValue(for: "mel")?.multiArrayValue)
-            let error = maximumReferenceError(mel, points: points)
-            traceProbe("\(model.id) iteration \(iteration) arithmetic mask: max mel error=\(error)")
-            #expect(error < 0.01, "\(model.id) arithmetic mask: max mel error \(error)")
-        }
-    }
-
-    @Test(arguments: AsrModel.all)
-    func exposedPreprocessorStagesMatchReference(model: AsrModel) async throws {
-        let reference = try loadStageReference()
-        let (audio, length, samples) = try preprocessorProbeInput(count: reference.sampleCount)
-        let directory = try await ModelStore.shared.download(model)
-        try autoreleasepool {
-            traceProbe("\(model.id) loading pre-emphasis probe")
-            let wave = try loadPreprocessorProbe(directory: directory, resource: "preprocessor-x-probe")
-            traceProbe("\(model.id) loaded pre-emphasis probe")
-            let output = try predict(wave, inputs: ["audio": audio, "audio_length": length])
-            let padded = try #require(output.featureValue(for: "x")?.multiArrayValue)
-            var incorrect = 0
-            var firstIncorrect: [Int] = []
-            var maximumError: Float = 0
-            for i in 0..<padded.count {
-                let sample = i - 256
-                let expected: Float = samples.indices.contains(sample)
-                    ? samples[sample] - 0.97 * (sample > 0 ? samples[sample - 1] : 0) : 0
-                let actual = padded[i].floatValue
-                let error = actual.isFinite ? abs(actual - expected) : .infinity
-                maximumError = max(maximumError, error)
-                if error > 0.000001 {
-                    incorrect += 1
-                    if firstIncorrect.count < 8 { firstIncorrect.append(i) }
-                }
-            }
-            traceProbe("\(model.id) pre-emphasis: \(incorrect) wrong samples, first \(firstIncorrect), max error \(maximumError)")
-            #expect(incorrect == 0)
-        }
-        for name in ["mel_1", "mean", "var", "mel", "real", "imag"] {
-            try autoreleasepool {
-                traceProbe("\(model.id) loading \(name) probe")
-                let probe = try loadPreprocessorProbe(directory: directory, resource: "preprocessor-\(name)-probe")
-                traceProbe("\(model.id) loaded \(name) probe")
-                let output = try predict(probe, inputs: ["audio": audio, "audio_length": length])
-                let tensor = try #require(output.featureValue(for: name)?.multiArrayValue)
-                let error = maximumReferenceError(tensor, points: reference.stages[name]!)
-                traceProbe("\(model.id) exposed \(name): max error=\(error)")
-                #expect(error < 0.01, "\(model.id) exposed \(name): max error \(error)")
-            }
-        }
-    }
-
     /// Inspect the export's input mask directly, before convolution and feature normalization.
     @Test(arguments: AsrModel.all)
     func preprocessorMaskPreservesEveryValidSample(model: AsrModel) async throws {
@@ -92,14 +31,18 @@ extension RealModelTests {
         }
     }
 
-    /// Frozen points across every mel channel catch missing audio even if two broken paths agree.
+    /// Frozen points across every channel and window catch missing audio even if two broken paths agree.
     @Test(arguments: AsrModel.all)
     func longPreprocessingMatchesFrozenFeatures(model: AsrModel) async throws {
         struct Reference: Decodable {
+            struct Window: Decodable {
+                let function: String
+                let sampleCount: Int
+                let frames: [Int]
+                let channels: [[Float]]
+            }
             let fixtureSHA256: String
-            let sampleCount: Int
-            let frames: [Int]
-            let channels: [[Float]]
+            let windows: [Window]
         }
         let fixture = Bundle.module.url(forResource: "long", withExtension: "wav", subdirectory: "Fixtures")!
         let referenceURL = Bundle.module.url(forResource: "long-mel-reference", withExtension: "json", subdirectory: "Fixtures")!
@@ -110,17 +53,21 @@ extension RealModelTests {
         let runtime = try ParakeetTdtCtc110M(directory: directory, computeUnits: realModelTestComputeUnits.coreML,
                                             ctcOnly: true, cacheDirectory: ModelStore.shared.compiledModelsDirectory)
         let samples = try ParakeetAudio.read(fixture)
-        for iteration in 0..<3 {
-            let prepared = try runtime.prepare(samples.prefix(reference.sampleCount), firstFrame: 0)
-            var maximumError: Float = 0
-            for (channel, expected) in reference.channels.enumerated() {
-                for (frame, value) in zip(reference.frames, expected) {
-                    let actual = prepared.mel[[0, NSNumber(value: channel), NSNumber(value: frame)]].floatValue
-                    maximumError = actual.isFinite ? max(maximumError, abs(actual - value)) : .infinity
+        #expect(Set(reference.windows.map(\.function)) == Set(runtime.config.windows.map(\.function)))
+        for window in reference.windows {
+            for iteration in 0..<3 {
+                let prepared = try runtime.prepare(samples.prefix(window.sampleCount), firstFrame: 0,
+                                                   forcedWindowSamples: window.sampleCount)
+                var maximumError: Float = 0
+                for (channel, expected) in window.channels.enumerated() {
+                    for (frame, value) in zip(window.frames, expected) {
+                        let actual = prepared.mel[[0, NSNumber(value: channel), NSNumber(value: frame)]].floatValue
+                        maximumError = actual.isFinite ? max(maximumError, abs(actual - value)) : .infinity
+                    }
                 }
+                // Allow float32 kernel variation and the final float16 cast, not missing speech.
+                #expect(maximumError < 0.01, "\(model.id) \(window.function) iteration \(iteration): frozen mel error \(maximumError)")
             }
-            // Allow float32 kernel variation and the final float16 cast, not missing speech.
-            #expect(maximumError < 0.01, "\(model.id) iteration \(iteration): frozen mel error \(maximumError)")
         }
     }
 
@@ -264,54 +211,6 @@ extension RealModelTests {
 
 private func predict(_ model: MLModel, inputs: [String: Any]) throws -> any MLFeatureProvider {
     try model.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs))
-}
-
-private struct StageReference: Decodable {
-    struct Points: Decodable { let indices: [Int]; let values: [Float] }
-    let sampleCount: Int
-    let stages: [String: Points]
-}
-
-private func loadStageReference() throws -> StageReference {
-    let url = Bundle.module.url(forResource: "preprocessor-stage-reference", withExtension: "json", subdirectory: "Fixtures")!
-    return try JSONDecoder().decode(StageReference.self, from: Data(contentsOf: url))
-}
-
-private func preprocessorProbeInput(count: Int) throws -> (MLMultiArray, MLMultiArray, [Float]) {
-    let fixture = Bundle.module.url(forResource: "long", withExtension: "wav", subdirectory: "Fixtures")!
-    let samples = Array(try ParakeetAudio.read(fixture).prefix(count))
-    let audio = try MLMultiArray(shape: [1, NSNumber(value: samples.count)], dataType: .float32)
-    audio.withUnsafeMutableBufferPointer(ofType: Float.self) { buffer, _ in
-        samples.withUnsafeBufferPointer { buffer.baseAddress!.update(from: $0.baseAddress!, count: samples.count) }
-    }
-    let length = try MLMultiArray(shape: [1], dataType: .int32)
-    length[0] = NSNumber(value: samples.count)
-    return (audio, length, samples)
-}
-
-private func maximumReferenceError(_ tensor: MLMultiArray, points: StageReference.Points) -> Float {
-    var maximumError: Float = 0
-    for (index, expected) in zip(points.indices, points.values) {
-        let actual = tensor[index].floatValue
-        maximumError = actual.isFinite ? max(maximumError, abs(actual - expected)) : .infinity
-    }
-    return maximumError
-}
-
-private func traceProbe(_ message: String) {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
-}
-
-private func loadPreprocessorProbe(directory: URL, resource: String) throws -> MLModel {
-    let probe = Bundle.module.url(forResource: resource, withExtension: "mlmodel", subdirectory: "Fixtures")!
-    let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: scratch) }
-    let package = scratch.appendingPathComponent("Preprocessor.mlpackage", isDirectory: true)
-    try FileManager.default.copyItem(at: directory.appendingPathComponent("Preprocessor.mlpackage"), to: package)
-    try Data(contentsOf: probe).write(to: package.appendingPathComponent("Data/com.apple.CoreML/model.mlmodel"))
-    let compiled = try ParakeetTdtCtc110M.modelURL(scratch, "Preprocessor", cache: ModelStore.shared.compiledModelsDirectory)
-    return try ParakeetTdtCtc110M.load(compiled, .cpuOnly, "w20")
 }
 
 private func tensorSummary(_ array: MLMultiArray) -> String {

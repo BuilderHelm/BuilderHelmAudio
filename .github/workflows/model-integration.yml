@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   integration:
-    name: Pinned 110M models and runtime parity
+    name: Pinned 110M + V3 models and runtime parity
     runs-on: macos-15
     timeout-minutes: 30
     env:

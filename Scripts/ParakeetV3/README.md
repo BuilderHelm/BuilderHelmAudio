@@ -16,13 +16,13 @@ Use `--precision fp16` for the unquantized FP16 encoder/predictor/joint baseline
 
 The exporter reconstructs the source architecture from original weights, loads component state dictionaries strictly, retains full token/duration logits and writes package checksums, source attribution, an export record and a Torch example tensor reference. The example reference is not independent NeMo parity evidence. A new exporter revision must be validated against independent original-checkpoint captures, including numerical error envelopes, valid lengths/padding, teacher-forced state trajectories, full decode sequences and WER before deployment.
 
-Load the completed local folder using `.experimentalParakeetV3`; see `Documentation/ExperimentalParakeetV3.md`. The encoder window is fixed at 15 seconds; the current experimental SDK handles longer offline recordings with bounded quiet-pause segmentation, overlapping context when needed and bounded blank-window recovery. It advertises neither CTC nor timing outputs and does not publish model files.
+Load the completed local folder using `.experimentalParakeetV3`; see `Documentation/ExperimentalParakeetV3.md`. A single-function export has a fixed 15-second window; the shared-weight release export adds a 30-second function. The SDK handles longer offline recordings with bounded quiet-pause segmentation, overlapping token consensus and bounded blank-window recovery. It advertises neither CTC nor timing outputs and does not publish model files.
 
 NVIDIA's original/derived weights retain CC BY 4.0 attribution. Exporter/runtime implementation is covered by this repository's license. The architecture code reuses BuilderHelm's own previously validated PyTorch encoder math with the v3 dimensions and bias/LSTM/vocabulary contracts.
 
 M5 is the available Mac validation machine. Models are distributed as portable `.mlpackage` files and compiled locally; no M5-only compiled model or chip requirement is introduced. Other-chip performance is unmeasured hardware coverage, not a requirement to obtain M1 hardware.
 
-For the shared-weight 15/30-second candidate, export a full FP16 15-second folder and a 30-second frontend/encoder folder, then merge them:
+For the shared-weight 15/30-second export, export a full FP16 15-second folder and a 30-second frontend/encoder folder, then merge them:
 
 ```sh
 python Scripts/ParakeetV3/export.py --nemo /path/model.nemo --example-wav /path/real-speech.wav --precision fp16 --window-seconds 30 --parts frontend encoder --out /path/long-export

@@ -5,7 +5,7 @@ import ParakeetRuntime
 
 extension RealModelTests {
     /// Compare SDK dispatch with the model runtime, including both modes and repeated requests.
-    @Test(arguments: AsrModel.all)
+    @Test(arguments: AsrModel.all.filter { $0.architecture == .parakeet110M })
     func adapterMatchesPublishedRuntime(model: AsrModel) async throws {
         let store = ModelStore.shared
         let directory = try await store.download(model)

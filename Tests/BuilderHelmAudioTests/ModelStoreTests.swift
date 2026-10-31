@@ -65,7 +65,11 @@ private func fixture(corrupt: Bool = false) throws -> (store: ModelStore, model:
         #expect(model.revision.count == 40 && model.revision.allSatisfy(\.isHexDigit))
         #expect(model.files.allSatisfy { $0.sha256.count == 64 && $0.size > 0 })
         #expect(Set(model.files.map(\.path)).isSuperset(of: ["config.json", "vocab.json", "Encoder.mlpackage/Manifest.json"]))
-        #expect(model.files.contains { $0.path == "TdtDecoder.bin" } == model.decodesTdt)
+        #expect(model.files.contains { $0.path == "TdtDecoder.bin" } == (model.architecture == .parakeet110M && model.decodesTdt))
+        if model.architecture == .parakeetV3 {
+            #expect(model.files.contains { $0.path == "Predictor.mlpackage/Manifest.json" })
+            #expect(model.files.contains { $0.path == "Joint.mlpackage/Manifest.json" })
+        }
     }
     #expect(Set(AsrModel.all.map(\.id)).count == AsrModel.all.count)
 }

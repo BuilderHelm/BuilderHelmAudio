@@ -2,7 +2,7 @@ import CoreML
 import CryptoKit
 import Foundation
 
-/// Experimental fixed-window v3 runtime. Serialize calls on each instance.
+/// Offline v3 runtime with bounded windows. Serialize calls on each instance.
 /// Transcript text is supported; emission frames are internal window-ownership markers, not aligned word times.
 public final class ParakeetTdtV3 {
     public struct Result {
@@ -154,7 +154,11 @@ public final class ParakeetTdtV3 {
         try Self.validateSampleCount(buffer.count, allowLongAudio: allowExperimentalLongAudio)
         // Keep short file and PCM requests on exactly the same decode path.
         if buffer.count <= requestWindowSamples {
-            return try autoreleasepool { try decode(buffer, checkCancellation: checkCancellation) }
+            return try autoreleasepool {
+                try requestWindowSamples == 480000
+                    ? decodeLongWindow(buffer, checkCancellation: checkCancellation)
+                    : decode(buffer, checkCancellation: checkCancellation)
+            }
         }
         while !buffer.isEmpty {
             try checkCancellation()
@@ -174,7 +178,13 @@ public final class ParakeetTdtV3 {
         guard samples.allSatisfy(\.isFinite) else { throw ParakeetError.invalidAudio("PCM samples must be finite") }
         try Self.validateSampleCount(samples.count, allowLongAudio: allowExperimentalLongAudio)
         requestWindowSamples = windowSize(for: samples.count)
-        if samples.count <= requestWindowSamples { return try autoreleasepool { try decode(samples, checkCancellation: checkCancellation) } }
+        if samples.count <= requestWindowSamples {
+            return try autoreleasepool {
+                try requestWindowSamples == 480000
+                    ? decodeLongWindow(samples, checkCancellation: checkCancellation)
+                    : decode(samples, checkCancellation: checkCancellation)
+            }
+        }
         var start = 0, allIDs: [Int] = [], allFrames: [Int] = []
         var pending: PendingWindow?
         while start < samples.count {
@@ -285,7 +295,10 @@ public final class ParakeetTdtV3 {
     }
 
     private func decodeLongWindow(_ samples: [Float], retryDepth: Int = 0, checkCancellation: () throws -> Void) throws -> Result {
-        let first = try decode(samples, checkCancellation: checkCancellation)
+        let first = try autoreleasepool { try decode(samples, checkCancellation: checkCancellation) }
+        if retryDepth == 0, requestWindowSamples == 480000, !first.tokenIDs.isEmpty {
+            return try recoverPartialBlanks(first, samples: samples, checkCancellation: checkCancellation)
+        }
         // The source model can blank an entire speech window at an unlucky cut.
         // Retry with at most two subdivision levels; never erase a nonempty primary result.
         guard first.tokenIDs.isEmpty, samples.count >= 80000 else { return first }
@@ -301,6 +314,100 @@ public final class ParakeetTdtV3 {
             : decode(Array(samples[cut...]), checkCancellation: checkCancellation)
         let ids = left.tokenIDs + right.tokenIDs
         return Result(text: text(ids), tokenIDs: ids, emissionFrames: left.emissionFrames + right.emissionFrames.map { $0 + cut / 1280 })
+    }
+
+    struct BlankSpan { let index: Int; let left: Int; let right: Int }
+
+    /// A large token-empty span is retried only when its audio is active and varies in energy.
+    static func blankSpans(_ primary: Result, samples: [Float]) -> [BlankSpan] {
+        let frames = (samples.count / 160 + 7) / 8
+        var gaps: [BlankSpan] = []
+        for index in 0...primary.tokenIDs.count {
+            let left = index == 0 ? -1 : primary.emissionFrames[index - 1]
+            let right = index == primary.tokenIDs.count ? frames : primary.emissionFrames[index]
+            if right - left >= 64 { gaps.append(BlankSpan(index: index, left: left, right: right)) }
+        }
+        guard !gaps.isEmpty else { return [] }
+        var energy: [Float] = []
+        for begin in stride(from: 0, to: samples.count - 159, by: 160) {
+            var squared: Float = 0
+            for i in begin..<(begin + 160) { squared += samples[i] * samples[i] }
+            energy.append(sqrt(squared / 160))
+        }
+        let threshold = max(0.0005, (energy.max() ?? 0) * 0.05)
+        gaps = gaps.filter { gap in
+            let begin = max(0, (gap.left + 1) * 8), end = min(energy.count, gap.right * 8)
+            guard end > begin else { return false }
+            let values = energy[begin..<end].sorted()
+            return values.filter { $0 > threshold }.count * 2 >= values.count
+                && values[values.count * 3 / 4] > max(0.000001, values[values.count / 4]) * 1.5
+        }
+        return gaps
+    }
+
+    /// Keep every primary token; fill only gaps bounded by matching tokens at the same audio time.
+    static func insertRecoveredTokens(_ primary: Result, candidate: Result, gaps: [BlankSpan]) -> (ids: [Int], frames: [Int])? {
+        guard !primary.tokenIDs.isEmpty, primary.tokenIDs.count == primary.emissionFrames.count,
+              candidate.tokenIDs.count == candidate.emissionFrames.count else { return nil }
+        let candidateIDs = candidate.tokenIDs, candidateFrames = candidate.emissionFrames
+        func anchor(_ first: Int) -> Int? {
+            guard first >= 0, first + 3 <= primary.tokenIDs.count, candidateIDs.count >= 3 else { return nil }
+            var best: (score: Int, index: Int)?
+            for j in 0...(candidateIDs.count - 3) {
+                var score = 0, matches = true
+                for k in 0..<3 {
+                    let distance = abs(primary.emissionFrames[first + k] - candidateFrames[j + k])
+                    if primary.tokenIDs[first + k] != candidateIDs[j + k] || distance > 16 { matches = false; break }
+                    score += distance
+                }
+                if matches, best == nil || score < best!.score { best = (score, j) }
+            }
+            return best?.index
+        }
+        var insertions: [Int: Range<Int>] = [:]
+        for gap in gaps {
+            let begin: Int, end: Int
+            if gap.index == 0 { begin = 0 }
+            else if let left = anchor(gap.index - 3) { begin = left + 3 }
+            else { continue }
+            if gap.index == primary.tokenIDs.count { end = candidateIDs.count }
+            else if let right = anchor(gap.index) { end = right }
+            else { continue }
+            guard end - begin >= 3,
+                  candidateFrames[begin] >= gap.left,
+                  candidateFrames[end - 1] <= gap.right else { continue }
+            insertions[gap.index] = begin..<end
+        }
+        guard !insertions.isEmpty else { return nil }
+        var ids: [Int] = [], times: [Int] = []
+        for i in 0...primary.tokenIDs.count {
+            if let added = insertions[i] { ids += candidateIDs[added]; times += candidateFrames[added] }
+            if i < primary.tokenIDs.count { ids.append(primary.tokenIDs[i]); times.append(primary.emissionFrames[i]) }
+        }
+        return (ids, times)
+    }
+
+    private func recoverPartialBlanks(_ primary: Result, samples: [Float], checkCancellation: () throws -> Void) throws -> Result {
+        let gaps = Self.blankSpans(primary, samples: samples)
+        guard !gaps.isEmpty else { return primary }
+        let originalSize = requestWindowSamples
+        requestWindowSamples = 240000
+        defer { requestWindowSamples = originalSize }
+        var start = 0, candidateIDs: [Int] = [], candidateFrames: [Int] = []
+        var pending: PendingWindow?
+        while start < samples.count {
+            try checkCancellation()
+            let buffer = Array(samples[start..<min(start + 240001, samples.count)])
+            let plan = Self.planWindow(buffer, windowSamples: 240000)
+            let candidate = try autoreleasepool { try decode(Array(buffer.prefix(plan.count)), checkCancellation: checkCancellation) }
+            Self.consume(candidate, start: start, seam: start + plan.right, pending: &pending, ids: &candidateIDs, frames: &candidateFrames)
+            if buffer.count <= 240000 { break }
+            start += plan.advance
+        }
+        if let last = pending { Self.flush(last, through: last.result.tokenIDs.count, ids: &candidateIDs, frames: &candidateFrames) }
+        let candidate = Result(text: "", tokenIDs: candidateIDs, emissionFrames: candidateFrames)
+        guard let recovered = Self.insertRecoveredTokens(primary, candidate: candidate, gaps: gaps) else { return primary }
+        return Result(text: text(recovered.ids), tokenIDs: recovered.ids, emissionFrames: recovered.frames)
     }
 
     private func decode(_ samples: [Float], checkCancellation: () throws -> Void) throws -> Result {

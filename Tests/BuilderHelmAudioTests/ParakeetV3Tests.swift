@@ -141,3 +141,49 @@ import Testing
     let silence = ParakeetTdtV3.join(a,previousStart:0,previousFirst:0,next:empty,nextStart:100*1280,seam:100*1280)
     #expect(silence.previousEnd == 3)
 }
+
+@Test func v3RecoveryKeepsPrimaryTokensAndRequiresAnchorsAtBothSides() throws {
+    let primary = ParakeetTdtV3.Result(text: "", tokenIDs: [1,2,3,8,9,10], emissionFrames: [0,1,2,100,101,102])
+    let candidate = ParakeetTdtV3.Result(text: "", tokenIDs: Array(1...10), emissionFrames: [0,1,2,20,40,60,80,100,101,102])
+    let gaps = [ParakeetTdtV3.BlankSpan(index: 3, left: 2, right: 100)]
+    let recovered = try #require(ParakeetTdtV3.insertRecoveredTokens(primary, candidate: candidate, gaps: gaps))
+    #expect(recovered.ids == Array(1...10))
+    #expect(recovered.frames == candidate.emissionFrames)
+    let missingAnchor = ParakeetTdtV3.Result(text: "", tokenIDs: [1,2,3,4,5,6,7,8,9,99], emissionFrames: candidate.emissionFrames)
+    #expect(ParakeetTdtV3.insertRecoveredTokens(primary, candidate: missingAnchor, gaps: gaps) == nil)
+}
+
+@Test func v3RecoveryRejectsRepeatedTextAtAnotherTimeAndTinyAdditions() {
+    let primary = ParakeetTdtV3.Result(text: "", tokenIDs: [1,2,3,8,9,10], emissionFrames: [0,1,2,100,101,102])
+    let gaps = [ParakeetTdtV3.BlankSpan(index: 3, left: 2, right: 100)]
+    let shifted = ParakeetTdtV3.Result(text: "", tokenIDs: Array(1...10), emissionFrames: [200,201,202,220,240,260,280,300,301,302])
+    #expect(ParakeetTdtV3.insertRecoveredTokens(primary, candidate: shifted, gaps: gaps) == nil)
+    let tiny = ParakeetTdtV3.Result(text: "", tokenIDs: [1,2,3,4,5,8,9,10], emissionFrames: [0,1,2,30,60,100,101,102])
+    #expect(ParakeetTdtV3.insertRecoveredTokens(primary, candidate: tiny, gaps: gaps) == nil)
+}
+
+@Test func v3RecoveryCanFillLeadingAndTrailingGapsWithoutReplacingPrimaryTokens() throws {
+    let primary = ParakeetTdtV3.Result(text: "", tokenIDs: [4,5,6], emissionFrames: [100,101,102])
+    let candidate = ParakeetTdtV3.Result(text: "", tokenIDs: Array(1...9), emissionFrames: [0,20,40,100,101,102,180,200,220])
+    let gaps = [ParakeetTdtV3.BlankSpan(index: 0, left: -1, right: 100),
+                ParakeetTdtV3.BlankSpan(index: 3, left: 102, right: 300)]
+    let recovered = try #require(ParakeetTdtV3.insertRecoveredTokens(primary, candidate: candidate, gaps: gaps))
+    #expect(recovered.ids == Array(1...9))
+    #expect(Array(recovered.frames[3..<6]) == primary.emissionFrames)
+}
+
+@Test func v3BlankRecoveryRequiresChangingActiveAudio() {
+    let primary = ParakeetTdtV3.Result(text: "", tokenIDs: [1,2,3,4,5,6], emissionFrames: [0,1,2,120,121,122])
+    let silence = [Float](repeating: 0, count: 12 * 16000)
+    #expect(ParakeetTdtV3.blankSpans(primary, samples: silence).isEmpty)
+    var steady = silence, changing = silence
+    for i in steady.indices {
+        let wave = Float(sin(Double(i) * 2 * .pi * 100 / 16000))
+        steady[i] = wave * 0.1
+        changing[i] = wave * ((i / 3200) % 2 == 0 ? 0.05 : 0.2)
+    }
+    #expect(ParakeetTdtV3.blankSpans(primary, samples: steady).isEmpty)
+    let gaps = ParakeetTdtV3.blankSpans(primary, samples: changing)
+    #expect(gaps.count == 1)
+    #expect(gaps.first?.index == 3)
+}

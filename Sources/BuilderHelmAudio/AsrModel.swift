@@ -112,15 +112,56 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
                  sha256: "ecbc3fe1c391a3feea1d1c39f8c15af674bd03cbaf0d0f5de4a564771c16bd16"),
         ])
 
-    /// Unreleased local v3 packages only. Use `SpeechRecognizer(directory:model:)`.
-    /// No remote repository or token/timing/CTC capability is advertised before release validation.
+    /// Multilingual Parakeet TDT 0.6B v3: FP16 text recognition in 25 languages.
+    /// Offline recordings use shared-weight 15/30-second windows. No CTC or aligned timestamps.
+    public static let parakeetTdtV3 = AsrModel(
+        id: "parakeet-tdt-0.6b-v3",
+        repository: "BuilderHelm/Parakeet-TDT-0.6B-V3-CoreML",
+        version: "1.0.0",
+        revision: "8c9b4b60c75054434c20a2e2ef14d7bc66253652",
+        architecture: .parakeetV3,
+        supportedLanguages: ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
+        capabilities: [.tdt], ctcConfiguration: nil,
+        files: [
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 1_130_533,
+                 sha256: "a16b4a8c8e0a09aa69e1ac85798dd3a32ddb178817593934114eda210701781a"),
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 1_222_780_672,
+                 sha256: "f65fba23e24cf44d1634b3a27632d92ef163f11d4e8d555cd5db50e201837db2"),
+            File(path: "Encoder.mlpackage/Manifest.json", size: 617,
+                 sha256: "514fd92fc3d35cbd16eed21aa205acbb31e42b32cd7f85624a6ac8859d2c134b"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 4_613,
+                 sha256: "33f5e1769a6c2fc5f2d4b3d831883cb270ed3eb76e1074a47015425e6658b606"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 12_642_764,
+                 sha256: "4e0e63d840032f7f07ddb1d64446051166281e5491bf22da8a945c41f6eedb3e"),
+            File(path: "Joint.mlpackage/Manifest.json", size: 617,
+                 sha256: "dab679d1d83a2e038f3de5e9aec52783e82a8ca36295f2821ea2903058c5da14"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 12_011,
+                 sha256: "589dbee0b6985ca6ce4cbff6baebcac15130ca5b6432b11c3044f252c48d1d67"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 23_604_992,
+                 sha256: "48adf0f0d47c406c8253d4f7fef967436a39da14f5a65e66d5a4b407be355d41"),
+            File(path: "Predictor.mlpackage/Manifest.json", size: 617,
+                 sha256: "43e2d60191e3cdd2eaf1ee1ebc28e3b06e301bd540755260c900b3ba2b857218"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 23_546,
+                 sha256: "67eb57c1f6768d3b041c0136be380c6df36907df9fef72daceb73933d1584e9f"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 7_348_032,
+                 sha256: "c7b165bbc95ac8538b0e3dc28e4f7a770dfa31e1cc9f754cb9055c211d224b21"),
+            File(path: "Preprocessor.mlpackage/Manifest.json", size: 617,
+                 sha256: "f49015764d1241e685821db2253738b10fb6b0f98c6ece34b3ba92b4790bd52d"),
+            File(path: "config.json", size: 2_476,
+                 sha256: "688cb56851784cddc8be7f9e471c76349b56f17649c44ed4fc6717a57f53a602"),
+            File(path: "vocab.json", size: 95_041,
+                 sha256: "6d23d30bfea120aaf0b911a3e2f66a72b011d0722554550b0bce821e1bd6409b"),
+        ])
+
+    /// Locally managed v3 exports. Use `SpeechRecognizer(directory:model:)`.
+    /// This descriptor has no remote repository and supports TDT text only.
     public static let experimentalParakeetV3 = AsrModel(
         id: "parakeet-tdt-0.6b-v3-local", repository: "", version: "experimental", revision: "",
         architecture: .parakeetV3,
         supportedLanguages: ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
         capabilities: [.tdt], ctcConfiguration: nil, files: [])
 
-    public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M]
+    public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M, .parakeetTdtV3]
 
     public static func named(_ id: String) -> AsrModel? { all.first { $0.id == id } }
 }

@@ -8,7 +8,8 @@ final class ParakeetV3Runtime: AsrRuntime {
     let keywordSpotter: KeywordSpotter? = nil
     private let model: ParakeetTdtV3
     init(directory: URL, computeUnits: MLComputeUnits, cache: URL) throws {
-        model = try ParakeetTdtV3(directory: directory, computeUnits: computeUnits, cacheDirectory: cache)
+        model = try ParakeetTdtV3(directory: directory, computeUnits: computeUnits, cacheDirectory: cache,
+                                 decoderComputeUnits: .cpuOnly)
     }
     func transcribe(file: URL, request: RuntimeRequest) throws -> RuntimeResult {
         try convert(model.transcribe(file: file, checkCancellation: request.cancellation.check))

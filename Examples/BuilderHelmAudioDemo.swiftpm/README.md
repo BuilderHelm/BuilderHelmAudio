@@ -18,4 +18,6 @@ results to the console:
 xcrun devicectl device process launch --console --device <device> ai.builderhelm.audio.demo --autobenchmark
 ```
 
+V3 is available in the model picker and returns text only; keyword input is disabled for it. The bundled frozen Mac reference covers the 110M models. A missing V3 reference is displayed as unmeasured, rather than as a mismatch.
+
 The samples are synthetic speech generated for this project.

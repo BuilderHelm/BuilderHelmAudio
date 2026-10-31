@@ -46,7 +46,7 @@
   <a href="#development">Development</a>
 </p>
 
-BuilderHelmAudio is a Swift package for speech recognition on iPhone, iPad and Mac. Load a model, pass it a recording, and get the transcript with token times.
+BuilderHelmAudio is a Swift package for speech recognition on iPhone, iPad and Mac. Load a model, pass it a recording, and get a transcript. The English TDT + CTC model also returns token times.
 
 It downloads [BuilderHelm's Parakeet models](https://huggingface.co/BuilderHelm) from Hugging Face, checks every file against a pinned SHA-256, keeps them on the device and runs them locally on the Neural Engine. No audio leaves the device.
 
@@ -60,10 +60,11 @@ print(transcript.text)
 
 ## Features
 
-- **Fast** — about 1,000× real time on a Mac (M5), 400–600× on an iPhone 13.
-- **Accurate** — 2.46% WER on LibriSpeech test-clean (TDT).
+- **Fast English models** — about 1,000× real time on a Mac (M5), 400–600× on an iPhone 13.
+- **Multilingual** — Parakeet V3 recognizes 25 European languages with original FP16 weights.
+- **English accuracy** — 2.46% WER on LibriSpeech test-clean (110M TDT).
 - **Simple** — one call to download and load, one call to transcribe.
-- **Token times** — TDT transcripts carry the time of every token, plus a CTC transcript from the same pass.
+- **Token times** — the 110M TDT + CTC model returns token times and a CTC transcript from the same pass.
 - **Keyword spotting** — find names and terms in audio, with start and end times. No tokenizer needed.
 - **Verified downloads** — every file is pinned to a Hugging Face commit and checked by SHA-256. Interrupted downloads resume file by file.
 - **Any audio** — any format AVFoundation reads, or raw samples; converted to 16 kHz mono.
@@ -78,8 +79,9 @@ print(transcript.text)
 |---|---|---|---:|---|
 | **`.parakeetTdtCtc110M`** | Transcription with token times | TDT text + token times, CTC text | 144 MB | [Parakeet-TDT-CTC-110M-CoreML](https://huggingface.co/BuilderHelm/Parakeet-TDT-CTC-110M-CoreML) |
 | **`.parakeetCtc110M`** | Fastest transcription, keyword spotting | CTC text | 124 MB | [Parakeet-CTC-110M-CoreML](https://huggingface.co/BuilderHelm/Parakeet-CTC-110M-CoreML) |
+| **`.parakeetTdtV3`** | Transcription in 25 languages | TDT text | 1.27 GB | [Parakeet-TDT-0.6B-V3-CoreML](https://huggingface.co/BuilderHelm/Parakeet-TDT-0.6B-V3-CoreML) |
 
-Both are NVIDIA's [Parakeet-TDT-CTC-110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m), converted to CoreML with an int8 encoder. English only. Each model is pinned to a Hugging Face commit, so a given SDK version always runs the same files.
+The two 110M models are English-only conversions of NVIDIA's [Parakeet-TDT-CTC-110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m) with INT8 encoders. V3 converts [Parakeet-TDT-0.6B-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) with unquantized FP16 weights; evaluated INT8/INT4 candidates failed the language accuracy gates. Each descriptor pins an immutable Hugging Face commit and every file's SHA-256.
 
 ---
 
@@ -95,7 +97,7 @@ https://github.com/BuilderHelm/BuilderHelmAudio
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/BuilderHelm/BuilderHelmAudio", from: "0.1.1"),
+    .package(url: "https://github.com/BuilderHelm/BuilderHelmAudio", from: "0.2.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: ["BuilderHelmAudio"]),
@@ -103,6 +105,8 @@ targets: [
 ```
 
 ---
+
+Upgrading from 0.1.1: see [0.2 migration notes](Documentation/Migration-0.2.md), including added error cases and capability-aware model iteration.
 
 ## Usage
 
@@ -126,6 +130,18 @@ print(transcript.realTimeFactor)             // audio seconds per processing sec
 Any format AVFoundation reads works (WAV, M4A, MP3, CAF and more). Long files are read in blocks, so they don't need to fit in memory.
 
 Load the recognizer once and reuse it. Calls run off the caller's thread, one at a time, so one instance can be shared.
+
+### Recognize 25 languages with V3
+
+```swift
+let recognizer = try await SpeechRecognizer.load(.parakeetTdtV3)
+let transcript = try await recognizer.transcribe(file: audioURL)
+print(transcript.text)
+```
+
+V3 automatically recognizes Bulgarian, Croatian, Czech, Danish, Dutch, English, Estonian, Finnish, French, German, Greek, Hungarian, Italian, Latvian, Lithuanian, Maltese, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish and Ukrainian.
+
+Offline recordings have no fixed duration limit. Short requests use a 15-second function; longer requests use a shared-weight 30-second function, with quiet-pause cuts and overlap token matching. Reuse one recognizer: the first request at a different window size may incur preparation cost. V3 returns text, with `ctcTranscript == nil` and empty `tokens`. CTC probabilities, keyword spotting, aligned timestamps and live partial results are unavailable. See [V3 validation and limitations](Documentation/ParakeetV3.md).
 
 ### Transcribe samples
 
@@ -201,7 +217,7 @@ This initializer blocks while CoreML loads the model; call it off the main threa
 | `.invalidModelConfiguration(_:)` | Metadata does not match the selected runtime |
 | `.invalidCtcConfiguration(_:)` | Invalid CTC layout, probability dimensions or vocabulary size |
 
-On the development branch, cancellation of an async load, download or transcription reports `CancellationError`.
+Cancellation of an async load, download or transcription reports `CancellationError`.
 Synchronous CoreML work already running may finish before cancellation is observed.
 
 ---
@@ -216,7 +232,7 @@ Synchronous CoreML work already running may finish before cancellation is observ
 | `transcribe(samples:includeCtcLogProbabilities:)` | Transcribe 16 kHz mono samples |
 | `spot(_:inFile:threshold:)` | Find keywords in an audio file |
 | `keywordSpotter.detect(_:in:threshold:)` | Find keywords in saved CTC probabilities |
-| `capabilities`, `keywordSpotterIfAvailable` | Check which outputs/operations the selected runtime supports (development branch) |
+| `capabilities`, `keywordSpotterIfAvailable` | Check which outputs/operations the selected runtime supports |
 | `SpeechRecognizer.loadAudio(_:)` | Read any supported file as 16 kHz mono samples |
 | `ModelStore.shared` | `download`, `isDownloaded`, `verify`, `remove`, `directory(for:)` |
 | `AsrModel.all`, `AsrModel.named(_:)` | List models, or look one up by id |
@@ -225,8 +241,8 @@ Synchronous CoreML work already running may finish before cancellation is observ
 |---|---|
 | `text` | TDT transcript (CTC on CTC-only models) |
 | `ctcText` | CTC transcript, kept as a String for compatibility |
-| `ctcTranscript` | Optional CTC output; nil means the runtime has no CTC output (development branch) |
-| `tokens` | `[TimedToken]`: each token's text and time in seconds |
+| `ctcTranscript` | Optional CTC output; nil means the runtime has no CTC output |
+| `tokens` | `[TimedToken]` when the selected model supports token timestamps; otherwise empty |
 | `duration`, `processingTime`, `realTimeFactor` | Audio length, processing time and speed |
 | `ctcLogProbabilities` | Per-frame CTC probabilities, when requested |
 
@@ -240,6 +256,7 @@ Synchronous CoreML work already running may finish before cancellation is observ
 swift run -c release bhaudio models
 swift run -c release bhaudio transcribe audio.wav
 swift run -c release bhaudio transcribe audio.wav --model parakeet-ctc-110m --json
+swift run -c release bhaudio transcribe multilingual.wav --model parakeet-tdt-0.6b-v3 --json
 swift run -c release bhaudio spot audio.wav "Neural Engine" BuilderHelm
 swift run -c release bhaudio benchmark cases.json --rounds 3
 ```
@@ -250,7 +267,7 @@ swift run -c release bhaudio benchmark cases.json --rounds 3
 
 ## Performance
 
-Speed, × real time (higher is faster):
+110M speed, × real time (higher is faster):
 
 | Model | Mac M5, short clips | Mac M5, long audio | iPhone 13, 6 s clip | iPhone 13, 72 s recording |
 |---|---:|---:|---:|---:|
@@ -268,7 +285,8 @@ Speed, × real time (higher is faster):
 - iOS 18+ or macOS 15+
 - Swift 6 (Xcode 16 or later)
 - A device with a Neural Engine for full speed; `computeUnits: .gpu` or `.cpu` also work
-- Disk: about twice the download per model (124–144 MB), including the copy CoreML compiles on first load
+- Apple Silicon Macs: M1 and later; physical Mac validation uses M5. Other-chip performance is unmeasured.
+- Disk: model download plus additional space for CoreML compilation (124–144 MB downloads for 110M; 1.27 GB for V3)
 - Network on first load only, to download the model from Hugging Face
 
 ---
@@ -284,7 +302,7 @@ Audio file or samples
   → transcript, token times, keyword hits
 ```
 
-The CPU decodes one window while the Neural Engine encodes the next.
+The 110M pipeline overlaps CPU decoding with the next encoder window. V3 processes bounded windows sequentially, retaining one encoder function and reusable output buffers. Its original LSTM predictor and joint are CoreML models; it returns TDT text without CTC or public token times.
 
 ---
 
@@ -323,7 +341,7 @@ bash Scripts/ci-ios.sh                        # selects an installed compatible 
 
 The iOS Simulator has no Neural Engine, so its speed is not representative. For device numbers, use the [demo app](#demo-app).
 
-The development branch adds automatic macOS/iOS unit CI and a separate real-model integration check for runtime/test changes.
+Automatic CI covers macOS/iOS unit tests and a separate real-model integration check for runtime/test changes, including all three published descriptors.
 See [runtime architecture and CI](Documentation/RuntimeArchitecture.md) and [milestone 1 validation](Documentation/Milestone1Validation.md).
 Real-model tests use pinned files; set `BUILDERHELM_TEST_COMPUTE=cpu` for CPU-only inference.
 
@@ -337,6 +355,8 @@ flowchart LR
     Recognizer --> Factory[Runtime selection from model metadata]
     Factory --> Adapter[110M adapter]
     Adapter --> Runtime[ParakeetRuntime]
+    Factory --> V3[V3 adapter]
+    V3 --> V3Runtime[ParakeetTdtV3]
     Runtime --> ANE[Encoder on the Neural Engine]
     Runtime --> CPU[TDT + CTC decoding on the CPU]
     Recognizer --> Spotter[KeywordSpotter]
@@ -370,9 +390,9 @@ BuilderHelmAudio/
 
 ## Status
 
-Published version: 0.1.1. Its device measurements are from an Apple M5 Mac (macOS 27.2) and an iPhone 13 (iOS 27.2).
-The development branch adds the runtime abstraction, model-specific CTC layouts, cancellation and CI described above;
-it still ships the same two English 110M models. Parakeet v3 is the next model milestone. Other devices, battery use and heat are not yet measured.
+Version 0.2.0 adds the multilingual V3 FP16 model, long-recording joins, runtime selection, cancellation and capability-aware APIs. Physical validation uses an Apple M5 Mac (macOS 27.2) and iPhone 13 (iOS 27.2). The compatibility target is all Apple Silicon Macs, M1 onward, with macOS 15+, and iOS 18+. See [V3 validation](Documentation/ParakeetV3.md) for accuracy, quantization decisions, sustained testing and coverage limits.
+
+Voice activity detection, live partial transcription, aligned V3 word/segment timestamps, subtitles, diarization, speech synthesis, noise suppression and echo cancellation are separate future work.
 
 [File an issue](https://github.com/BuilderHelm/BuilderHelmAudio/issues/new) if something breaks.
 
@@ -380,7 +400,7 @@ it still ships the same two English 110M models. Parakeet v3 is the next model m
 
 ## License
 
-Code: [MIT](LICENSE). Models: CC-BY-4.0, from NVIDIA's [Parakeet-TDT-CTC-110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m); see each model card.
+Code: [MIT](LICENSE). Models: CC-BY-4.0, derived from NVIDIA's Parakeet checkpoints; see each model card for source attribution and modification notices.
 
 <p align="center">
   <em>Speak. It transcribes. On the device.</em>

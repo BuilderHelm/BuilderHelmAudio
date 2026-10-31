@@ -162,6 +162,7 @@ public final class ParakeetTdtCtc110M {
     private let ctcFitLastWindow: Bool
     /// CTC-only: prepare window i+1 and finish window i-1 on the CPU while the Neural Engine encodes window i.
     private let ctcPipeline: Bool
+    private let ctcConsistentJoin: Bool
     var decodesTdt: Bool { decoder != nil || decoderJoint != nil }
     let pieces: [String]
     let block: Int
@@ -194,11 +195,14 @@ public final class ParakeetTdtCtc110M {
     ///     function that fits instead of the largest. Transcripts are unchanged.
     ///   - ctcPipeline: CTC-only; overlap mel and decoding on the CPU with the encoder on the
     ///     Neural Engine for long audio. Transcripts are unchanged.
+    ///   - ctcConsistentJoin: CTC-only; join long-audio windows where the stitched tokens match what
+    ///     one window decoded alone, so words at a join are not repeated.
     public init(directory: URL, computeUnits: MLComputeUnits = .cpuAndNeuralEngine, ctcOnly: Bool = false,
                 cacheDirectory: URL? = nil, carryTdtStateAcrossWindows: Bool = false, adaptiveLongAudio: Bool? = nil,
                 preferredShortWindowSeconds: Double? = 4, maximumLoadedWindows: Int = 4,
                 ctcLongWindowSeconds: Double? = nil, ctcLongOverlapSeconds: Double? = nil,
-                ctcFitLastWindow: Bool = true, ctcPipeline: Bool = true) throws {
+                ctcFitLastWindow: Bool = true, ctcPipeline: Bool = true, ctcConsistentJoin: Bool = true) throws {
+        self.ctcConsistentJoin = ctcConsistentJoin
         self.ctcFitLastWindow = ctcFitLastWindow
         self.ctcPipeline = ctcPipeline
         guard maximumLoadedWindows > 0, preferredShortWindowSeconds.map({ $0.isFinite && $0 > 0 }) ?? true
@@ -487,7 +491,7 @@ public final class ParakeetTdtCtc110M {
         }
         func accept(_ next: Window) {
             if let previousWindow = pending {
-                let cut = boundary(previousWindow, next)
+                let cut = decodesTdt || !ctcConsistentJoin ? boundary(previousWindow, next) : ctcBoundary(previousWindow, next)
                 consume(previousWindow, from: keepFrom, to: cut - previousWindow.firstFrame)
                 keepFrom = cut - next.firstFrame
             }
@@ -638,6 +642,32 @@ public final class ParakeetTdtCtc110M {
         if candidates.isEmpty { candidates = Array(lo..<max(lo + 1, hi)) }
         let score = { (f: Int) in a.blankLogProbs[f - a.firstFrame] + b.blankLogProbs[f - b.firstFrame] }
         return candidates.max { score($0) < score($1) }!
+    }
+
+    /// CTC-only join: among the usual candidate frames, prefer a cut where the tokens stitched from about
+    /// one second either side equal what one window decoded there alone, so a word both windows heard a
+    /// few frames apart is kept once. Falls back to `boundary` when no candidate qualifies.
+    func ctcBoundary(_ a: Window, _ b: Window) -> Int {
+        let lo = b.firstFrame, hi = a.firstFrame + a.frames
+        let margin = max(1, (hi - lo) / 4), reach = 12
+        guard hi - lo > 2 * margin else { return boundary(a, b) }
+        let blank = config.blank_id
+        func collapse(_ frames: ArraySlice<Int>) -> [Int] {
+            var out: [Int] = [], previous = blank
+            for token in frames {
+                if token != previous && token != blank { out.append(token) }
+                previous = token
+            }
+            return out
+        }
+        let left = { (f: Int) in a.ctcTokens[f - a.firstFrame] }, right = { (f: Int) in b.ctcTokens[f - b.firstFrame] }
+        let score = { (f: Int) in a.blankLogProbs[f - a.firstFrame] + b.blankLogProbs[f - b.firstFrame] }
+        let consistent = ((lo + margin)..<(hi - margin)).filter { cut in
+            let from = max(lo, cut - reach), to = min(hi, cut + reach)
+            let stitched = collapse(ArraySlice((from..<cut).map(left) + (cut..<to).map(right)))
+            return stitched == collapse(ArraySlice((from..<to).map(left))) || stitched == collapse(ArraySlice((from..<to).map(right)))
+        }
+        return consistent.max { score($0) < score($1) } ?? boundary(a, b)
     }
 
     // MARK: - TDT greedy decoding

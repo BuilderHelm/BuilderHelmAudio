@@ -11,7 +11,8 @@ let package = Package(
     targets: [
         // CoreML + Accelerate Parakeet runtime, shared with the BuilderHelm model repositories.
         .target(name: "ParakeetRuntime", swiftSettings: [.swiftLanguageMode(.v5)]),
-        .target(name: "BuilderHelmAudio", dependencies: ["ParakeetRuntime"]),
+        .target(name: "BuilderHelmAudio", dependencies: ["ParakeetRuntime"],
+                resources: [.copy("PrivacyInfo.xcprivacy")]),
         .executableTarget(name: "bhaudio", dependencies: ["BuilderHelmAudio"]),
         .testTarget(name: "BuilderHelmAudioTests", dependencies: ["BuilderHelmAudio", "ParakeetRuntime"], resources: [.copy("Fixtures")]),
     ]

@@ -95,7 +95,7 @@ https://github.com/BuilderHelm/BuilderHelmAudio
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/BuilderHelm/BuilderHelmAudio", from: "0.1.0"),
+    .package(url: "https://github.com/BuilderHelm/BuilderHelmAudio", from: "0.1.1"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: ["BuilderHelmAudio"]),
@@ -290,6 +290,8 @@ BuilderHelmAudio makes one kind of network request: downloading model files from
 | Model files | Downloaded from `huggingface.co` at a pinned commit, or from your mirror via `ModelStore(baseURL:)` |
 | Analytics | None |
 
+The package ships an App Store privacy manifest (`PrivacyInfo.xcprivacy`): no tracking, no data collected. It declares one required-reason API, reading the size of downloaded model files in the app's container (`C617.1`).
+
 ---
 
 ## Development
@@ -353,7 +355,7 @@ BuilderHelmAudio/
 
 ## Status
 
-Version 0.1.0, the first release. Tested on an Apple M5 Mac (macOS 27.2) and an iPhone 13 (iOS 27.2). Other devices, battery use and heat are not yet measured. English only.
+Version 0.1.1. Tested on an Apple M5 Mac (macOS 27.2) and an iPhone 13 (iOS 27.2). Other devices, battery use and heat are not yet measured. English only.
 
 [File an issue](https://github.com/BuilderHelm/BuilderHelmAudio/issues/new) if something breaks.
 

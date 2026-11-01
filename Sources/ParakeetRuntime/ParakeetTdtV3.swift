@@ -40,6 +40,8 @@ public final class ParakeetTdtV3 {
     private let encoderComputeUnits: MLComputeUnits
     private var requestWindowSamples = 240000
     private var activeWindow: WindowModels?
+    // Internal integration-test probe; absent during normal inference.
+    var diagnostics: ((String, [Float]) -> Void)?
     private final class WindowModels {
         let window: Window
         let frontend: MLModel, encoder: MLModel
@@ -450,6 +452,7 @@ public final class ParakeetTdtV3 {
     private func decode(_ samples: [Float], checkCancellation: () throws -> Void) throws -> Result {
         try checkCancellation()
         guard samples.count <= requestWindowSamples, samples.allSatisfy(\.isFinite) else { throw ParakeetError.invalidAudio("Invalid v3 window") }
+        diagnostics?("pcm", samples)
         // Fewer than one source mel hop has no valid encoder frames.
         if samples.count < 160 { return Result(text: "", tokenIDs: [], emissionFrames: []) }
         let models = try windowModels()
@@ -464,6 +467,7 @@ public final class ParakeetTdtV3 {
             let length = try Self.scalarLength(Self.output(melOutput, "mel_length", [1]))
             guard length == samples.count / 160 else { throw ParakeetError.badConfig("Incorrect v3 mel valid length") }
             try withExtendedLifetime((melOutput, models.frontend)) { try Self.copy(mel, into: models.mel) }
+            diagnose("mel", models.mel)
             models.melLength[0] = NSNumber(value: length)
             let input = try Self.provider(["mel": models.mel, "mel_length": models.melLength])
             let firstEncoded: MLFeatureProvider
@@ -491,12 +495,15 @@ public final class ParakeetTdtV3 {
             return frames
         }
         let features = models.featuresSnapshot
+        diagnose("encoder", features)
         var time = 0, symbols = 0, lastToken = 8192, needsPrediction = true
         var ids: [Int] = [], times: [Int] = []
         while time < frames {
             try checkCancellation()
             if needsPrediction {
                 targets[0] = NSNumber(value: lastToken)
+                diagnostics?("target", [Float(lastToken)])
+                diagnose("h_in", hidden); diagnose("c_in", cell)
                 try autoreleasepool {
                     // Publish the current mutable state for each prediction. Keep the provider
                     // and its output alive until all framework-owned tensors have been copied.
@@ -506,6 +513,8 @@ public final class ParakeetTdtV3 {
                         try Self.copy(Self.output(predicted, "decoder", [1,640,1]), into: decoderStep)
                         try Self.copy(Self.output(predicted, "h_out", [2,1,640]), into: candidateHidden)
                         try Self.copy(Self.output(predicted, "c_out", [2,1,640]), into: candidateCell)
+                        diagnose("decoder", decoderStep)
+                        diagnose("h_out", candidateHidden); diagnose("c_out", candidateCell)
                     }
                 }
                 needsPrediction = false
@@ -514,14 +523,17 @@ public final class ParakeetTdtV3 {
             guard features.dataType == .float32 else { throw ParakeetError.badConfig("Expected float32 encoder output") }
             let strides = features.strides.map(\.intValue)
             for channel in 0..<1024 { dst[channel] = src[channel * strides[1] + time * strides[2]] }
+            diagnose("encoder_step", encoderStep)
             let (token, duration) = try autoreleasepool {
                 let input = try Self.provider(["encoder_step": encoderStep, "decoder_step": decoderStep])
                 let output = try joint.prediction(from: input)
                 return try withExtendedLifetime((input, output)) {
                     let logits = try Self.output(output, "logits", [1,1,1,8198])
+                    diagnose("logits", logits)
                     return (try Self.argmax(logits, 0..<8193), try Self.argmax(logits, 8193..<8198) - 8193)
                 }
             }
+            diagnostics?("decision", [Float(time), Float(token), Float(duration)])
             if token != 8192 {
                 ids.append(token); times.append(time); lastToken = token
                 try Self.copy(candidateHidden, into: hidden); try Self.copy(candidateCell, into: cell)
@@ -534,6 +546,23 @@ public final class ParakeetTdtV3 {
             }
         }
         return Result(text: text(ids), tokenIDs: ids, emissionFrames: times)
+    }
+
+    private func diagnose(_ name: String, _ array: MLMultiArray) {
+        guard let diagnostics else { return }
+        let shape = array.shape.map(\.intValue)
+        let values = array.withUnsafeBufferPointer(ofType: Float.self) { buffer in
+            let strides = array.strides.map(\.intValue)
+            return (0..<array.count).map { index -> Float in
+                var remainder = index, offset = 0
+                for axis in shape.indices.reversed() {
+                    offset += (remainder % shape[axis]) * strides[axis]
+                    remainder /= shape[axis]
+                }
+                return buffer[offset]
+            }
+        }
+        diagnostics(name, values)
     }
 
     private func text(_ ids: [Int]) -> String { Self.detokenize(ids, pieces: pieces, punctuation: config.punctuation) }

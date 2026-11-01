@@ -6,12 +6,14 @@ import BuilderHelmAudio
 /// (TEST_RUNNER_BUILDERHELM_INTEGRATION=1 with xcodebuild) to run.
 private let enabled = ProcessInfo.processInfo.environment["BUILDERHELM_INTEGRATION"] == "1"
 let realModelTestComputeUnits: ComputeUnits = ProcessInfo.processInfo.environment["BUILDERHELM_TEST_COMPUTE"] == "cpu" ? .cpu : .neuralEngine
+// Keep closures outside @Test arguments: Swift 6.0 crashes expanding them across suite extensions.
+let real110MModels = AsrModel.all.filter { $0.architecture == .parakeet110M }
 private let speech = Bundle.module.url(forResource: "speech", withExtension: "wav", subdirectory: "Fixtures")!
 
 // Serial execution also prevents simultaneous first downloads of the same model through a reentrant actor.
 @Suite(.serialized, .enabled(if: enabled))
 struct RealModelTests {
-@Test(arguments: AsrModel.all.filter { $0.architecture == .parakeet110M })
+@Test(arguments: real110MModels)
 func transcribesAndSpots(model: AsrModel) async throws {
     if ModelStore.shared.isDownloaded(model) { #expect(try await ModelStore.shared.verify(model)) }
     let recognizer = try await SpeechRecognizer.load(model, computeUnits: realModelTestComputeUnits)

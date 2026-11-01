@@ -26,7 +26,7 @@ For the shared-weight 15/30-second export, export a full FP16 15-second folder a
 
 ```sh
 python Scripts/ParakeetV3/export.py --nemo /path/model.nemo --example-wav /path/real-speech.wav --precision fp16 --window-seconds 30 --parts frontend encoder --out /path/long-export
-python Scripts/ParakeetV3/merge_windows.py --short /path/short-export --long /path/long-export --out /path/combined-export
+python Scripts/ParakeetV3/merge_windows.py --short /path/short-export --long /path/long-export --out /path/combined-export --split-encoder
 ```
 
-The merger verifies source manifests and uses Core ML constant deduplication. The short function remains the default; the runtime loads the 30-second encoder only for longer requests. Final model qualification and a public pinned descriptor are required before advertising a new export as released.
+The merger verifies source manifests, bisects each encoder into two approximately equal-weight programs, and uses Core ML constant deduplication across the corresponding 15/30-second functions. `Encoder` and `EncoderTail` run sequentially. Each encoder package is below 1 GB; the combined download remains approximately 1.27 GB. Omitting `--split-encoder` retains the single-encoder research layout. Splitting does not quantize or retrain the model. The utility’s random-data correctness check is disabled to avoid loading several large models together; numerical, token/frame, held-out accuracy and device checks are required before deployment. The short function remains the default; the runtime loads the 30-second encoder only for longer requests. Final model qualification and a public pinned descriptor are required before advertising a new export as released.

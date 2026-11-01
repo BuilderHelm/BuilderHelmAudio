@@ -1,6 +1,6 @@
 # Parakeet TDT 0.6B v3
 
-BuilderHelmAudio 0.2.0 adds `.parakeetTdtV3`, a pinned conversion of NVIDIA's multilingual Parakeet v3. It ships **unquantized FP16** encoder, predictor and joint weights, with an FP32 frontend and floating-point interfaces. There is no additional training. The download is 1,267,647,148 bytes, plus CoreML's locally compiled cache.
+BuilderHelmAudio 0.2.0 adds `.parakeetTdtV3`, a pinned conversion of NVIDIA's multilingual Parakeet v3. It ships **unquantized FP16** encoder, predictor and joint weights, with an FP32 frontend and floating-point interfaces. There is no additional training. The download is 1,267,667,816 bytes, plus CoreML's locally compiled cache.
 
 ```swift
 let recognizer = try await SpeechRecognizer.load(.parakeetTdtV3)
@@ -12,9 +12,9 @@ The descriptor advertises the checkpoint's 25 languages and TDT text only. `ctcT
 
 ## Runtime and long recordings
 
-Requests up to 15 seconds use `w15`; longer requests use `w30`. The frontend and encoder share constants across both functions, adding about 3.3% to the 15-second bundle. The runtime keeps one encoder function resident. Reuse the recognizer; a function switch can incur preparation cost.
+Requests up to 15 seconds use `w15`; longer requests use `w30`. Each frontend/encoder package shares its own constants across both functions. The FP16 Conformer is partitioned into sequential `Encoder` and `EncoderTail` programs, each below 1 GB. This preserves the weights while retaining an approximately 1.27 GB download; the second window adds about 3.3%. The runtime retains the two stages for one window size at a time. Reuse the recognizer; a function switch can incur preparation cost.
 
-Files are read in bounded blocks of at most 480,001 input samples, with no fixed SDK recording-duration limit. The caller owns the full array when using the PCM API. Encoder outputs are consumed one window at a time. Model-load/feature temporaries are drained and compiled package URLs are cached per recognizer. Owned inputs and feature snapshots use page-aligned storage; model-returned tensors are read inside scoped buffer access. CPU/Neural Engine requests reuse output buffers and prediction options. GPU requests use framework-managed outputs and default prediction options.
+Files are read in bounded blocks of at most 480,001 input samples, with no fixed SDK recording-duration limit. The caller owns the full array when using the PCM API. Encoder outputs are consumed one window at a time. Model-load/feature temporaries are drained and compiled package URLs are cached per recognizer. Owned inputs and feature snapshots use page-aligned storage; model-returned tensors are read inside scoped buffer access. Partitioned encoder stages use framework-managed outputs and default prediction options. The stage boundary retains its producers until the final features are copied into owned storage. Existing single-encoder exports retain their CPU/Neural Engine output-buffer reuse.
 
 The planner searches 10 ms RMS values for a quiet run of at least 160 ms, using the greater of 0.0005 and 2% of peak RMS as the threshold. Eligible cut ranges are 8–12 seconds for `w15` and 20–27 seconds for `w30`. Input coverage is retained and cuts are aligned to the encoder's 80 ms frame grid. A full encoder window retains right context. With no eligible pause, frame-aligned overlap supplies context. Joins prefer at least three matching token IDs near the same audio time and fall back to emission-frame ownership. Entirely blank speech-bearing windows can receive at most two subdivision levels.
 

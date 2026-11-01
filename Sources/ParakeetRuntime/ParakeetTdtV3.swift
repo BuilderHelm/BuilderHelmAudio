@@ -29,29 +29,32 @@ public final class ParakeetTdtV3 {
         let punctuation: [String]
         let files: [String: String]
         let windows: [Window]?
+        let encoder_stages: [String]?
     }
     private let allowExperimentalLongAudio: Bool
     private let config: Config
     private let pieces: [String]
     private let predictor: MLModel, joint: MLModel
     private let frontendURL: URL, encoderURL: URL
+    private let encoderTailURL: URL?
     private let encoderComputeUnits: MLComputeUnits
     private var requestWindowSamples = 240000
     private var activeWindow: WindowModels?
     private final class WindowModels {
         let window: Window
         let frontend: MLModel, encoder: MLModel
+        let encoderTail: MLModel?
         let audio: MLMultiArray, audioLength: MLMultiArray
         let mel: MLMultiArray, melLength: MLMultiArray, featuresSnapshot: MLMultiArray
         let encoderOptions: MLPredictionOptions?
-        init(window: Window, frontend: MLModel, encoder: MLModel) throws {
-            self.window = window; self.frontend = frontend; self.encoder = encoder
+        init(window: Window, frontend: MLModel, encoder: MLModel, encoderTail: MLModel? = nil) throws {
+            self.window = window; self.frontend = frontend; self.encoder = encoder; self.encoderTail = encoderTail
             audio = try ParakeetTdtV3.array([1,window.samples])
             audioLength = try ParakeetTdtV3.array([1],.int32)
             mel = try ParakeetTdtV3.array([1,128,window.melFrames])
             melLength = try ParakeetTdtV3.array([1],.int32)
             featuresSnapshot = try ParakeetTdtV3.array([1,1024,window.encoderFrames])
-            if encoder.configuration.computeUnits != .cpuAndGPU && encoder.configuration.computeUnits != .all {
+            if encoderTail == nil && encoder.configuration.computeUnits != .cpuAndGPU && encoder.configuration.computeUnits != .all {
                 let options = MLPredictionOptions()
                 options.outputBackings = [
                     "encoder":try ParakeetTdtV3.alignedOutput([1,1024,window.encoderFrames]),
@@ -60,7 +63,19 @@ public final class ParakeetTdtV3 {
                 encoderOptions = options
             } else { encoderOptions = nil }
             try ParakeetTdtV3.validate(frontend, inputs: ["audio_signal":[1,window.samples],"audio_length":[1]], outputs:["mel":[1,128,window.melFrames],"mel_length":[1]])
-            try ParakeetTdtV3.validate(encoder, inputs: ["mel":[1,128,window.melFrames],"mel_length":[1]], outputs:["encoder":[1,1024,window.encoderFrames],"encoder_length":[1]])
+            if let tail = encoderTail {
+                try ParakeetTdtV3.validate(encoder, inputs: ["mel":[1,128,window.melFrames],"mel_length":[1]], outputs:[:])
+                let producers = encoder.modelDescription.inputDescriptionsByName.merging(encoder.modelDescription.outputDescriptionsByName) { _, output in output }
+                for (name, input) in tail.modelDescription.inputDescriptionsByName {
+                    guard let from = producers[name]?.multiArrayConstraint, let to = input.multiArrayConstraint,
+                          from.shape.map(\.intValue) == to.shape.map(\.intValue), from.dataType == to.dataType else {
+                        throw ParakeetError.badConfig("Incompatible encoder-stage connection: \(name)")
+                    }
+                }
+                try ParakeetTdtV3.validate(tail, inputs:[:], outputs:["encoder":[1,1024,window.encoderFrames],"encoder_length":[1]])
+            } else {
+                try ParakeetTdtV3.validate(encoder, inputs: ["mel":[1,128,window.melFrames],"mel_length":[1]], outputs:["encoder":[1,1024,window.encoderFrames],"encoder_length":[1]])
+            }
         }
     }
     private let targets: MLMultiArray, hidden: MLMultiArray, cell: MLMultiArray
@@ -88,7 +103,10 @@ public final class ParakeetTdtV3 {
                 throw ParakeetError.badConfig("Expected ordered w15/w30 window functions")
             }
         }
-        let required = ["Preprocessor", "Encoder", "Predictor", "Joint"]
+        guard config.encoder_stages == nil || config.encoder_stages == ["Encoder", "EncoderTail"] else {
+            throw ParakeetError.badConfig("Unsupported encoder-stage contract")
+        }
+        let required = ["Preprocessor", "Predictor", "Joint"] + (config.encoder_stages ?? ["Encoder"])
         guard config.files["vocab.json"] != nil else { throw ParakeetError.badConfig("Missing vocabulary checksum") }
         for name in required {
             for file in ["Manifest.json", "Data/com.apple.CoreML/model.mlmodel", "Data/com.apple.CoreML/weights/weight.bin"] {
@@ -121,12 +139,14 @@ public final class ParakeetTdtV3 {
                 return try ParakeetTdtCtc110M.load(url, units, nil)
             }
         }
-        let compiled = try autoreleasepool { () throws -> (URL,URL) in
+        let hasTail = config.encoder_stages != nil
+        let compiled = try autoreleasepool { () throws -> (URL,URL,URL?) in
             let front = try ParakeetTdtCtc110M.modelURL(directory,"Preprocessor",cache:cacheDirectory,allowBundledCompiled:false)
             let enc = try ParakeetTdtCtc110M.modelURL(directory,"Encoder",cache:cacheDirectory,allowBundledCompiled:false)
-            return (front,enc)
+            let tail = hasTail ? try ParakeetTdtCtc110M.modelURL(directory,"EncoderTail",cache:cacheDirectory,allowBundledCompiled:false) : nil
+            return (front,enc,tail)
         }
-        frontendURL = compiled.0; encoderURL = compiled.1
+        frontendURL = compiled.0; encoderURL = compiled.1; encoderTailURL = compiled.2
         predictor = try load("Predictor", decoderComputeUnits ?? computeUnits)
         joint = try load("Joint", decoderComputeUnits ?? computeUnits)
         targets = try Self.array([1, 1], .int32)
@@ -149,10 +169,13 @@ public final class ParakeetTdtV3 {
             ?? Window(samples: 240000, function: nil)
         let current = try autoreleasepool { () throws -> WindowModels in
             func load(_ name: String, _ units: MLComputeUnits) throws -> MLModel {
-                let url = name == "Preprocessor" ? frontendURL : encoderURL
+                let url: URL
+                if name == "Preprocessor" { url = frontendURL }
+                else if name == "EncoderTail", let tail = encoderTailURL { url = tail }
+                else { url = encoderURL }
                 return try ParakeetTdtCtc110M.load(url, units, window.function)
             }
-            return try WindowModels(window:window,frontend:load("Preprocessor",.cpuOnly),encoder:load("Encoder",encoderComputeUnits))
+            return try WindowModels(window:window,frontend:load("Preprocessor",.cpuOnly),encoder:load("Encoder",encoderComputeUnits),encoderTail:encoderTailURL == nil ? nil : load("EncoderTail",encoderComputeUnits))
         }
         activeWindow = current
         return current
@@ -443,14 +466,28 @@ public final class ParakeetTdtV3 {
             try withExtendedLifetime((melOutput, models.frontend)) { try Self.copy(mel, into: models.mel) }
             models.melLength[0] = NSNumber(value: length)
             let input = try Self.provider(["mel": models.mel, "mel_length": models.melLength])
-            let encoded: MLFeatureProvider
-            if let options = models.encoderOptions { encoded = try models.encoder.prediction(from: input, options: options) }
-            else { encoded = try models.encoder.prediction(from: input) }
+            let firstEncoded: MLFeatureProvider
+            if let options = models.encoderOptions { firstEncoded = try models.encoder.prediction(from: input, options: options) }
+            else { firstEncoded = try models.encoder.prediction(from: input) }
             try checkCancellation()
+            let encoded: MLFeatureProvider, tailInput: MLFeatureProvider?
+            if let tail = models.encoderTail {
+                var values: [String: MLFeatureValue] = [:]
+                for name in tail.modelDescription.inputDescriptionsByName.keys {
+                    guard let value = firstEncoded.featureValue(for: name) ?? input.featureValue(for: name) else {
+                        throw ParakeetError.badConfig("Missing encoder-stage input: \(name)")
+                    }
+                    values[name] = value
+                }
+                let provider = try MLDictionaryFeatureProvider(dictionary: values)
+                tailInput = provider
+                encoded = try tail.prediction(from: provider)
+                try checkCancellation()
+            } else { tailInput = nil; encoded = firstEncoded }
             let features = try Self.output(encoded, "encoder", [1,1024,models.window.encoderFrames])
             let frames = try Self.scalarLength(Self.output(encoded, "encoder_length", [1]))
             guard frames == (samples.count / 160 + 7) / 8 else { throw ParakeetError.badConfig("Incorrect v3 encoder valid length") }
-            try withExtendedLifetime((input, encoded, models.encoder)) { try Self.copy(features, into: models.featuresSnapshot) }
+            try withExtendedLifetime((input, firstEncoded, tailInput, encoded, models.encoder, models.encoderTail)) { try Self.copy(features, into: models.featuresSnapshot) }
             return frames
         }
         let features = models.featuresSnapshot

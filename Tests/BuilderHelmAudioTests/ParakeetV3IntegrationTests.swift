@@ -22,11 +22,15 @@ extension RealModelTests {
                 var values: [String: [Float]] = [:]
                 for key in output.featureNames.sorted() {
                     let array = try #require(output.featureValue(for: key)?.multiArrayValue)
-                    let scalarValues = (0..<array.count).map { array[$0].floatValue }
+                    var copied: [Float]?
                     if array.dataType == .float32 {
+                        // Copy before scalar indexing can materialize framework-owned output storage.
                         let owned = try ParakeetTdtV3.alignedOutput(array.shape.map(\.intValue))
                         try ParakeetTdtV3.copy(array, into: owned)
-                        let copied = (0..<owned.count).map { owned[$0].floatValue }
+                        copied = (0..<owned.count).map { owned[$0].floatValue }
+                    }
+                    let scalarValues = (0..<array.count).map { array[$0].floatValue }
+                    if let copied {
                         let mismatches = zip(scalarValues, copied).filter { $0 != $1 }.count
                         #expect(mismatches == 0, "V3 \(name).\(key): tensor copy differs from scalar reads")
                     }

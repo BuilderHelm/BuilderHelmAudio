@@ -493,25 +493,35 @@ public final class ParakeetTdtV3 {
         let features = models.featuresSnapshot
         var time = 0, symbols = 0, lastToken = 8192, needsPrediction = true
         var ids: [Int] = [], times: [Int] = []
-        let predictorInput = try Self.provider(["targets": targets, "h_in": hidden, "c_in": cell])
-        let jointInput = try Self.provider(["encoder_step": encoderStep, "decoder_step": decoderStep])
         while time < frames {
             try checkCancellation()
             if needsPrediction {
                 targets[0] = NSNumber(value: lastToken)
-                let predicted = try predictor.prediction(from: predictorInput)
-                try Self.copy(Self.output(predicted, "decoder", [1,640,1]), into: decoderStep)
-                try Self.copy(Self.output(predicted, "h_out", [2,1,640]), into: candidateHidden)
-                try Self.copy(Self.output(predicted, "c_out", [2,1,640]), into: candidateCell)
+                try autoreleasepool {
+                    // Publish the current mutable state for each prediction. Keep the provider
+                    // and its output alive until all framework-owned tensors have been copied.
+                    let input = try Self.provider(["targets": targets, "h_in": hidden, "c_in": cell])
+                    let predicted = try predictor.prediction(from: input)
+                    try withExtendedLifetime((input, predicted)) {
+                        try Self.copy(Self.output(predicted, "decoder", [1,640,1]), into: decoderStep)
+                        try Self.copy(Self.output(predicted, "h_out", [2,1,640]), into: candidateHidden)
+                        try Self.copy(Self.output(predicted, "c_out", [2,1,640]), into: candidateCell)
+                    }
+                }
                 needsPrediction = false
             }
             let src = features.dataPointer.assumingMemoryBound(to: Float.self), dst = encoderStep.dataPointer.assumingMemoryBound(to: Float.self)
             guard features.dataType == .float32 else { throw ParakeetError.badConfig("Expected float32 encoder output") }
             let strides = features.strides.map(\.intValue)
             for channel in 0..<1024 { dst[channel] = src[channel * strides[1] + time * strides[2]] }
-            let output = try joint.prediction(from: jointInput)
-            let logits = try Self.output(output, "logits", [1,1,1,8198])
-            let token = try Self.argmax(logits, 0..<8193), duration = try Self.argmax(logits, 8193..<8198) - 8193
+            let (token, duration) = try autoreleasepool {
+                let input = try Self.provider(["encoder_step": encoderStep, "decoder_step": decoderStep])
+                let output = try joint.prediction(from: input)
+                return try withExtendedLifetime((input, output)) {
+                    let logits = try Self.output(output, "logits", [1,1,1,8198])
+                    return (try Self.argmax(logits, 0..<8193), try Self.argmax(logits, 8193..<8198) - 8193)
+                }
+            }
             if token != 8192 {
                 ids.append(token); times.append(time); lastToken = token
                 try Self.copy(candidateHidden, into: hidden); try Self.copy(candidateCell, into: cell)

@@ -6,10 +6,9 @@ final class ParakeetV3Runtime: AsrRuntime {
     let mode: DecodingMode = .tdt
     let capabilities: AsrCapabilities = [.tdt]
     let keywordSpotter: KeywordSpotter? = nil
-    let model: ParakeetTdtV3
+    let model: ParakeetTdtV3.OverlapSession
     init(directory: URL, computeUnits: MLComputeUnits, cache: URL) throws {
-        model = try ParakeetTdtV3(directory: directory, computeUnits: computeUnits, cacheDirectory: cache,
-                                 decoderComputeUnits: .cpuOnly)
+        model = try ParakeetTdtV3.OverlapSession(directory: directory, cacheDirectory: cache, computeUnits: computeUnits)
     }
     func transcribe(file: URL, request: RuntimeRequest) throws -> RuntimeResult {
         try convert(model.transcribe(file: file, checkCancellation: request.cancellation.check))

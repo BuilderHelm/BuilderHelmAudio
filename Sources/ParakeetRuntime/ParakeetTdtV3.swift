@@ -30,12 +30,15 @@ public final class ParakeetTdtV3 {
         let files: [String: String]
         let windows: [Window]?
         let encoder_stages: [String]?
+        let staged_preprocessor: Bool?
     }
     private let allowExperimentalLongAudio: Bool
     private let config: Config
     private let pieces: [String]
     private let predictor: MLModel, joint: MLModel
     private let frontendURL: URL, encoderURL: URL
+    private let featureExtractor: MLModel?
+    private let featureAudio: MLMultiArray?
     private let encoderTailURL: URL?
     private let encoderComputeUnits: MLComputeUnits
     private var requestWindowSamples = 240000
@@ -49,7 +52,7 @@ public final class ParakeetTdtV3 {
         let audio: MLMultiArray, audioLength: MLMultiArray
         let mel: MLMultiArray, melLength: MLMultiArray, featuresSnapshot: MLMultiArray
         let encoderOptions: MLPredictionOptions?
-        init(window: Window, frontend: MLModel, encoder: MLModel, encoderTail: MLModel? = nil) throws {
+        init(window: Window, frontend: MLModel, encoder: MLModel, encoderTail: MLModel? = nil, stagedPreprocessor: Bool = false) throws {
             self.window = window; self.frontend = frontend; self.encoder = encoder; self.encoderTail = encoderTail
             audio = try ParakeetTdtV3.array([1,window.samples])
             audioLength = try ParakeetTdtV3.array([1],.int32)
@@ -64,7 +67,10 @@ public final class ParakeetTdtV3 {
                 ]
                 encoderOptions = options
             } else { encoderOptions = nil }
-            try ParakeetTdtV3.validate(frontend, inputs: ["audio_signal":[1,window.samples],"audio_length":[1]], outputs:["mel":[1,128,window.melFrames],"mel_length":[1]])
+            let frontendInputs = stagedPreprocessor
+                ? ["raw_mel":[1,128,window.melFrames],"audio_length":[1]]
+                : ["audio_signal":[1,window.samples],"audio_length":[1]]
+            try ParakeetTdtV3.validate(frontend, inputs: frontendInputs, outputs:["mel":[1,128,window.melFrames],"mel_length":[1]])
             if let tail = encoderTail {
                 try ParakeetTdtV3.validate(encoder, inputs: ["mel":[1,128,window.melFrames],"mel_length":[1]], outputs:[:])
                 let producers = encoder.modelDescription.inputDescriptionsByName.merging(encoder.modelDescription.outputDescriptionsByName) { _, output in output }
@@ -149,6 +155,12 @@ public final class ParakeetTdtV3 {
             return (front,enc,tail)
         }
         frontendURL = compiled.0; encoderURL = compiled.1; encoderTailURL = compiled.2
+        if config.staged_preprocessor == true {
+            guard config.windows != nil else { throw ParakeetError.badConfig("Staged frontend requires w15/w30 functions") }
+            featureExtractor = try ParakeetTdtCtc110M.load(compiled.0, .cpuOnly, "features")
+            featureAudio = try Self.array([1,1,64512])
+            try Self.validate(featureExtractor!, inputs:["waveform":[1,1,64512]], outputs:["raw_mel":[1,128,401]])
+        } else { featureExtractor = nil; featureAudio = nil }
         predictor = try load("Predictor", decoderComputeUnits ?? computeUnits)
         joint = try load("Joint", decoderComputeUnits ?? computeUnits)
         targets = try Self.array([1, 1], .int32)
@@ -175,9 +187,11 @@ public final class ParakeetTdtV3 {
                 if name == "Preprocessor" { url = frontendURL }
                 else if name == "EncoderTail", let tail = encoderTailURL { url = tail }
                 else { url = encoderURL }
-                return try ParakeetTdtCtc110M.load(url, units, window.function)
+                let function = name == "Preprocessor" && config.staged_preprocessor == true
+                    ? window.function.map { "normalize_" + $0 } : window.function
+                return try ParakeetTdtCtc110M.load(url, units, function)
             }
-            return try WindowModels(window:window,frontend:load("Preprocessor",.cpuOnly),encoder:load("Encoder",encoderComputeUnits),encoderTail:encoderTailURL == nil ? nil : load("EncoderTail",encoderComputeUnits))
+            return try WindowModels(window:window,frontend:load("Preprocessor",.cpuOnly),encoder:load("Encoder",encoderComputeUnits),encoderTail:encoderTailURL == nil ? nil : load("EncoderTail",encoderComputeUnits),stagedPreprocessor:config.staged_preprocessor == true)
         }
         activeWindow = current
         return current
@@ -449,6 +463,52 @@ public final class ParakeetTdtV3 {
         return Result(text: text(recovered.ids), tokenIDs: recovered.ids, emissionFrames: recovered.frames)
     }
 
+    private func preprocess(_ samples: [Float], models: WindowModels) throws -> MLFeatureProvider {
+        guard let featureExtractor, let featureAudio else {
+            return try models.frontend.prediction(from: Self.provider(["audio_signal": models.audio, "audio_length": models.audioLength]))
+        }
+        let frames = models.window.melFrames
+        let rawFeatures = try Self.array([1,128,frames])
+        for firstFrame in stride(from: 0, to: frames, by: 401) {
+            featureAudio.withUnsafeMutableBufferPointer(ofType: Float.self) { destination, strides in
+                for i in 0..<64512 {
+                    let index = firstFrame * 160 + i - 256
+                    let value: Float
+                    if index >= 0 && index < samples.count {
+                        value = samples[index] - 0.97 * (index > 0 ? samples[index - 1] : 0)
+                    } else { value = 0 }
+                    destination[i * strides[2]] = value
+                }
+            }
+            let input = try Self.provider(["waveform": featureAudio])
+            let output = try featureExtractor.prediction(from: input)
+            let raw = try Self.output(output, "raw_mel", [1,128,401])
+            guard raw.dataType == .float32 else { throw ParakeetError.badConfig("Expected FP32 raw mel features") }
+            withExtendedLifetime((input, output)) {
+                raw.withUnsafeBufferPointer(ofType: Float.self) { source in
+                    let strides = raw.strides.map(\.intValue)
+                    rawFeatures.withUnsafeMutableBufferPointer(ofType: Float.self) { destination, targetStrides in
+                        for channel in 0..<128 {
+                            for frame in 0..<min(401, frames - firstFrame) {
+                                destination[channel * targetStrides[1] + (firstFrame + frame) * targetStrides[2]] = source[channel * strides[1] + frame * strides[2]]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let input = try Self.provider(["raw_mel": rawFeatures, "audio_length": models.audioLength])
+        let output = try models.frontend.prediction(from: input)
+        // Snapshot while the full-window normalization inputs and outputs are retained.
+        return try withExtendedLifetime((input, output)) {
+            let mel = try Self.array([1,128,frames])
+            try Self.copy(Self.output(output, "mel", [1,128,frames]), into: mel)
+            let length = try Self.array([1], .int32)
+            length[0] = NSNumber(value: try Self.scalarLength(Self.output(output, "mel_length", [1])))
+            return try Self.provider(["mel": mel, "mel_length": length])
+        }
+    }
+
     private func decode(_ samples: [Float], checkCancellation: () throws -> Void) throws -> Result {
         try checkCancellation()
         guard samples.count <= requestWindowSamples, samples.allSatisfy(\.isFinite) else { throw ParakeetError.invalidAudio("Invalid v3 window") }
@@ -461,7 +521,7 @@ public final class ParakeetTdtV3 {
         samples.withUnsafeBufferPointer { p in audio.dataPointer.assumingMemoryBound(to: Float.self).update(from: p.baseAddress!, count: samples.count) }
         audioLength[0] = NSNumber(value: samples.count)
         let frames = try autoreleasepool { () throws -> Int in
-            let melOutput = try models.frontend.prediction(from: Self.provider(["audio_signal": audio, "audio_length": audioLength]))
+            let melOutput = try preprocess(samples, models: models)
             try checkCancellation()
             let mel = try Self.output(melOutput, "mel", [1,128,models.window.melFrames])
             let length = try Self.scalarLength(Self.output(melOutput, "mel_length", [1]))

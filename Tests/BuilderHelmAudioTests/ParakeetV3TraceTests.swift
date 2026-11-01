@@ -34,9 +34,59 @@ private final class V3TraceLog: @unchecked Sendable {
 }
 
 extension RealModelTests {
+    @Test func v3FrontendMatchesFrozenFullWindowFeatures() async throws {
+        struct Reference: Decodable {
+            struct Window: Decodable {
+                let function: String
+                let sampleCount: Int
+                let frames: [Int]
+                let channels: [[Float]]
+            }
+            let fixtureSHA256: String
+            let windows: [Window]
+        }
+        let fixture = Bundle.module.url(forResource: "long", withExtension: "wav", subdirectory: "Fixtures")!
+        let url = Bundle.module.url(forResource: "v3-mel-reference", withExtension: "json", subdirectory: "Fixtures")!
+        let reference = try JSONDecoder().decode(Reference.self, from: Data(contentsOf: url))
+        let digest = SHA256.hash(data: try Data(contentsOf: fixture)).map { String(format: "%02x", $0) }.joined()
+        try #require(digest == reference.fixtureSHA256)
+        let original = try await ModelStore.shared.download(.parakeetTdtV3)
+        let directory = ProcessInfo.processInfo.environment["BUILDERHELM_V3_MODEL_DIRECTORY"]
+            .map { URL(fileURLWithPath: $0) } ?? original
+        let runtime = try ParakeetTdtV3(directory: directory, computeUnits: .cpuOnly,
+                                       cacheDirectory: ModelStore.shared.compiledModelsDirectory,
+                                       decoderComputeUnits: .cpuOnly)
+        let samples = try SpeechRecognizer.loadAudio(fixture)
+        for window in reference.windows {
+            var observed: [Float]?
+            runtime.diagnostics = { stage, values in
+                if stage == "mel" {
+                    observed = values
+                    runtime.diagnostics = nil
+                }
+            }
+            _ = try runtime.transcribe(Array(samples.prefix(window.sampleCount)))
+            runtime.diagnostics = nil
+            let mel = try #require(observed)
+            let frames = window.sampleCount / 160 + 1
+            try #require(mel.count == 128 * frames && window.channels.count == 128)
+            var maximumError: Float = 0
+            for (channel, values) in window.channels.enumerated() {
+                for (frame, expected) in zip(window.frames, values) {
+                    let actual = mel[channel * frames + frame]
+                    maximumError = actual.isFinite ? max(maximumError, abs(actual - expected)) : .infinity
+                }
+            }
+            print("V3 frozen \(window.function): maximum mel error \(maximumError)")
+            #expect(maximumError < 0.01, "V3 \(window.function) differs from frozen full-window features")
+        }
+    }
+
     /// Trace the actual adapter on SpeechRecognizer's serial queue, including window switches.
     @Test func v3FullDecodeTraceIsRepeatable() async throws {
-        let directory = try await ModelStore.shared.download(.parakeetTdtV3)
+        let original = try await ModelStore.shared.download(.parakeetTdtV3)
+        let directory = ProcessInfo.processInfo.environment["BUILDERHELM_V3_MODEL_DIRECTORY"]
+            .map { URL(fileURLWithPath: $0) } ?? original
         let runtime = try ParakeetV3Runtime(directory: directory, computeUnits: .cpuOnly,
                                             cache: ModelStore.shared.compiledModelsDirectory)
         let log = V3TraceLog()

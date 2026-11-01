@@ -7,7 +7,7 @@ import Testing
 
 extension RealModelTests {
     /// Inspect the export's input mask directly, before convolution and feature normalization.
-    @Test(arguments: AsrModel.all)
+    @Test(arguments: real110MModels)
     func preprocessorMaskPreservesEveryValidSample(model: AsrModel) async throws {
         let directory = try await ModelStore.shared.download(model)
         let probe = Bundle.module.url(forResource: "preprocessor-mask-probe", withExtension: "mlmodel", subdirectory: "Fixtures")!
@@ -32,7 +32,7 @@ extension RealModelTests {
     }
 
     /// Frozen points across every channel and window catch missing audio even if two broken paths agree.
-    @Test(arguments: AsrModel.all)
+    @Test(arguments: real110MModels)
     func longPreprocessingMatchesFrozenFeatures(model: AsrModel) async throws {
         struct Reference: Decodable {
             struct Window: Decodable {
@@ -72,7 +72,7 @@ extension RealModelTests {
     }
 
     /// Compare independent inputs and scalar reads so layout errors cannot make both paths agree.
-    @Test(arguments: AsrModel.all)
+    @Test(arguments: real110MModels)
     func longWindowsMatchIndependentInputs(model: AsrModel) async throws {
         let directory = try await ModelStore.shared.download(model)
         let url = Bundle.module.url(forResource: "long", withExtension: "wav", subdirectory: "Fixtures")!
@@ -125,7 +125,7 @@ extension RealModelTests {
         }
     }
 
-    @Test(arguments: AsrModel.all)
+    @Test(arguments: real110MModels)
     func encoderOutputsSurviveTheNextPrediction(model: AsrModel) async throws {
         let directory = try await ModelStore.shared.download(model)
         let url = Bundle.module.url(forResource: "long", withExtension: "wav", subdirectory: "Fixtures")!
@@ -143,7 +143,7 @@ extension RealModelTests {
         #expect(changed, "Different speech windows must produce different CTC probabilities")
     }
 
-    @Test(arguments: AsrModel.all)
+    @Test(arguments: real110MModels)
     func allWindowShapesPreservePreprocessing(model: AsrModel) async throws {
         let directory = try await ModelStore.shared.download(model)
         let url = Bundle.module.url(forResource: "long", withExtension: "wav", subdirectory: "Fixtures")!
@@ -169,7 +169,7 @@ extension RealModelTests {
     }
 
     /// Validate semantic outputs at each boundary; two equally empty transcripts are not parity evidence.
-    @Test(arguments: AsrModel.all)
+    @Test(arguments: real110MModels)
     func inferenceStagesPreserveSpeech(model: AsrModel) async throws {
         let directory = try await ModelStore.shared.download(model)
         let url = Bundle.module.url(forResource: "speech", withExtension: "wav", subdirectory: "Fixtures")!

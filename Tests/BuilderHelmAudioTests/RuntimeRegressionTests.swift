@@ -38,7 +38,7 @@ func runtimeRegressionSnapshot() async throws {
     let urls = fixtureURLs + corpus
     let audioHashes = try urls.map { hash(try Data(contentsOf: $0)) }
     var snapshots: [Snapshot] = []
-    for model in AsrModel.all {
+    for model in AsrModel.all.filter({ $0.architecture == .parakeet110M }) {
         let recognizer = try await SpeechRecognizer.load(model)
         for (i, url) in urls.enumerated() {
             let transcript = try await recognizer.transcribe(file: url, includeCtcLogProbabilities: i < 2)

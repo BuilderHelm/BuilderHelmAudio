@@ -1,8 +1,8 @@
-# Runtime architecture (unreleased)
+# Runtime architecture
 
 The public `SpeechRecognizer` owns an internal `AsrRuntime` implementation. Model metadata selects the implementation; decoder-specific result conversion belongs to that implementation.
 
-The first adapter wraps the `ParakeetTdtCtc110M` library. Both shipped packages use the `parakeet110M` architecture with different capabilities. This work prepares the SDK for other implementations; it does not add Parakeet v3 or advertise another supported model.
+The 110M adapter wraps `ParakeetTdtCtc110M`; its two English packages use the `parakeet110M` architecture with different capabilities. The separate V3 adapter wraps `ParakeetTdtV3` and supports multilingual TDT text with no CTC or timestamp output. See [V3 validation](ParakeetV3.md).
 
 The pinned 110M compatibility exports provide a bounded `features` function and one `normalize_` function per window. With `staged_preprocessor: true` in the model config, the runtime computes float32 pre-emphasis, extracts at most 401 raw log-mel frames per prediction, then normalizes the assembled complete window. Encoder/decoder weights, vocabulary and window policies retain the v1.1.0 behavior. [The export script](../Scripts/stage-preprocessor.py) reproduces these additional functions from the original specification without changing `weight.bin`. Bundles without the flag retain the original preprocessor path. Runtime tensor copies honor CoreML's current strides, including padded output rows. Frozen reference points cover every channel throughout all four window sizes.
 
@@ -22,7 +22,7 @@ The pinned 110M compatibility exports provide a bounded `features` function and 
 
 The 110M adapter requires its actual vocabulary/layout and English capability set. The existing CTC-only package still automatically selects `.ctc`, including when the caller leaves the default `.tdt` argument unchanged. A full package in `.ctc` mode reports only its effective CTC/keyword capabilities.
 
-Bundled directories without an `AsrModel` retain the old 110M loading convention. Future architectures need explicit model metadata.
+Bundled directories without an `AsrModel` retain the old 110M loading convention. Other architectures, including V3, need explicit model metadata.
 
 ## Results and unavailable operations
 
@@ -88,4 +88,4 @@ BUILDERHELM_INTEGRATION=1 BUILDERHELM_TEST_COMPUTE=cpu swift test -c release --f
 
 Use a full Xcode installation for CoreML compilation and simulator testing; set `DEVELOPER_DIR` if `xcode-select` points to Command Line Tools.
 
-The optional `runtimeRegressionSnapshot` test accepts `BUILDERHELM_REGRESSION_OUT`, optional `BUILDERHELM_REGRESSION_BASELINE`, and colon-separated `BUILDERHELM_REGRESSION_CASES` manifests (`{"files":[{"path":"..."}]}`). It hashes input audio, text/token-time output, and fixture CTC probabilities/keyword results. Snapshots remain external to the repository; no corpus audio or transcripts are committed. Capture the baseline before a code change, then compare the candidate on the same hardware/compute path. The test is skipped unless an output path is provided.
+The optional `runtimeRegressionSnapshot` test accepts `BUILDERHELM_REGRESSION_OUT`, optional `BUILDERHELM_REGRESSION_BASELINE`, and colon-separated `BUILDERHELM_REGRESSION_CASES` manifests (`{"files":[{"path":"..."}]}`). It hashes input audio, text/token-time output, and fixture CTC probabilities/keyword results. Snapshots remain external to the repository; no corpus audio or transcripts are committed. This snapshot covers the 110M family; V3 has its own capability and short/long reuse integration test. Capture the baseline before a code change, then compare the candidate on the same hardware/compute path. The test is skipped unless an output path is provided.

@@ -66,7 +66,7 @@ final class DemoModel {
         busy = true
         defer { busy = false }
         do {
-            let result = try await recognizer.transcribe(file: url, includeCtcLogProbabilities: true)
+            let result = try await recognizer.transcribe(file: url, includeCtcLogProbabilities: recognizer.capabilities.contains(.ctc))
             transcript = result.text
             var line = String(format: "%.1f s audio in %.0f ms · %.0f× real time", result.duration,
                               result.processingTime * 1000, result.realTimeFactor)
@@ -96,7 +96,7 @@ final class DemoModel {
             }
             times.sort()
             let median = times[times.count / 2]
-            let match = references["\(model.id)/\(sample.rawValue)"] == text ? "matches Mac" : "differs from Mac"
+            let match = references["\(model.id)/\(sample.rawValue)"].map { $0 == text ? "matches Mac" : "differs from Mac" } ?? "no frozen reference"
             transcript = text
             stats = String(format: "%@ · %@\n%.1f s audio · median %.0f ms (best %.0f, worst %.0f) · %.0f× real time · %@",
                            model.id, device, duration, median * 1000, times.first! * 1000, times.last! * 1000, duration / median, match)

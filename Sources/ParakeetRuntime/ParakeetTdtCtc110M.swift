@@ -346,10 +346,10 @@ public final class ParakeetTdtCtc110M {
     /// `cache/<name>-<content hash>-<macOS build>/` and reused from that fixed path:
     /// Core ML caches each Neural Engine function by model path, so a fresh
     /// temporary path re-pays about 5 s per encoder function on every launch.
-    static func modelURL(_ directory: URL, _ name: String, cache: URL) throws -> URL {
+    static func modelURL(_ directory: URL, _ name: String, cache: URL, allowBundledCompiled: Bool = true) throws -> URL {
         let fm = FileManager.default
         let bundled = directory.appendingPathComponent(name + ".mlmodelc")
-        if fm.fileExists(atPath: bundled.path) { return bundled }
+        if allowBundledCompiled && fm.fileExists(atPath: bundled.path) { return bundled }
         let package = directory.appendingPathComponent(name + ".mlpackage")
         guard fm.fileExists(atPath: package.path) else { throw ParakeetError.missingModel(name) }
         let prefix = "\(name)-\(try contentHash(package))-"

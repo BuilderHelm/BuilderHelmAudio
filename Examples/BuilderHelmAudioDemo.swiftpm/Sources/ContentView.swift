@@ -11,6 +11,7 @@ struct ContentView: View {
                     Picker("Model", selection: $demo.model) {
                         Text("Parakeet CTC 110M").tag(AsrModel.parakeetCtc110M)
                         Text("Parakeet TDT + CTC 110M").tag(AsrModel.parakeetTdtCtc110M)
+                        Text("Parakeet V3 · 25 languages").tag(AsrModel.parakeetTdtV3)
                     }
                     if let fraction = demo.downloadFraction {
                         ProgressView(value: fraction) { Text("Downloading \(Int(fraction * 100))%") }
@@ -36,6 +37,7 @@ struct ContentView: View {
                     .tint(demo.recording ? .red : .accentColor)
                     TextField("Keywords, comma separated", text: $demo.keywords)
                         .textInputAutocapitalization(.never)
+                        .disabled(!demo.model.capabilities.contains(.keywordSpotting))
                 }
 
                 Section("Benchmark") {

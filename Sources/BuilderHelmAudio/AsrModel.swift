@@ -1,6 +1,6 @@
 import Foundation
 
-/// A speech recognition model published by BuilderHelm on Hugging Face, pinned to an exact revision.
+/// A pinned published recognition model or an explicitly local experimental descriptor.
 public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
     /// A file in the model repository, with the size and SHA-256 it must have after download.
     public struct File: Sendable, Hashable {
@@ -27,7 +27,9 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
     public let files: [File]
 
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.size } }
-    public var description: String { "\(repository) \(version)" }
+    public var description: String { "\(repository.isEmpty ? id : repository) \(version)" }
+    /// Fixed SDK input limit in seconds; nil means no fixed duration limit is imposed by the runtime.
+    public var maxRequestDuration: TimeInterval? { nil }
 
     init(id: String, repository: String, version: String, revision: String, architecture: AsrArchitecture,
          supportedLanguages: [String], capabilities: AsrCapabilities, ctcConfiguration: CtcConfiguration?, files: [File]) {
@@ -110,7 +112,62 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
                  sha256: "ecbc3fe1c391a3feea1d1c39f8c15af674bd03cbaf0d0f5de4a564771c16bd16"),
         ])
 
-    public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M]
+    /// Multilingual Parakeet TDT 0.6B v3: FP16 text recognition in 25 languages.
+    /// Offline recordings use shared-weight 15/30-second windows. No CTC or aligned timestamps.
+    public static let parakeetTdtV3 = AsrModel(
+        id: "parakeet-tdt-0.6b-v3",
+        repository: "BuilderHelm/Parakeet-TDT-0.6B-V3-CoreML",
+        version: "1.0.1",
+        revision: "3578e62cd8d94e56337bcc23e8b21e7f25617fbf",
+        architecture: .parakeetV3,
+        supportedLanguages: ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
+        capabilities: [.tdt], ctcConfiguration: nil,
+        files: [
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 581_731,
+                 sha256: "fe8c3ea5143cfbc6b807eb906ad1df7839da24bb00d3ec1c7f626d28fb7904f6"),
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 615_729_280,
+                 sha256: "654f958bb131f6e99bcd27ba2ce02a78e549285d7cc907edb736812dc4c6f14b"),
+            File(path: "Encoder.mlpackage/Manifest.json", size: 617,
+                 sha256: "717a4c37b8f4413e9404585eb8cfb37825117a313751bee2bf3a6e649eb2efa8"),
+            File(path: "EncoderTail.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 557_772,
+                 sha256: "cf4da74798755b40eaa387faf2d6df0dc6f60ae559e27d51553679539f1d260e"),
+            File(path: "EncoderTail.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 607_061_824,
+                 sha256: "9e171b6a97dbe3bda30921bf7710cbaec69c250202271662f60ac63cdab78aaa"),
+            File(path: "EncoderTail.mlpackage/Manifest.json", size: 617,
+                 sha256: "7768afd24206d54799753fbfc0ee113c310a1a6856464b97843eeacf57ae7ea8"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 4_613,
+                 sha256: "33f5e1769a6c2fc5f2d4b3d831883cb270ed3eb76e1074a47015425e6658b606"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 12_642_764,
+                 sha256: "4e0e63d840032f7f07ddb1d64446051166281e5491bf22da8a945c41f6eedb3e"),
+            File(path: "Joint.mlpackage/Manifest.json", size: 617,
+                 sha256: "dab679d1d83a2e038f3de5e9aec52783e82a8ca36295f2821ea2903058c5da14"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 12_011,
+                 sha256: "589dbee0b6985ca6ce4cbff6baebcac15130ca5b6432b11c3044f252c48d1d67"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 23_604_992,
+                 sha256: "48adf0f0d47c406c8253d4f7fef967436a39da14f5a65e66d5a4b407be355d41"),
+            File(path: "Predictor.mlpackage/Manifest.json", size: 617,
+                 sha256: "43e2d60191e3cdd2eaf1ee1ebc28e3b06e301bd540755260c900b3ba2b857218"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 37_760,
+                 sha256: "7a67f874be8af28a9a868415387d08df9df11762bedf270aa7c82d212312e964"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 7_348_032,
+                 sha256: "c7b165bbc95ac8538b0e3dc28e4f7a770dfa31e1cc9f754cb9055c211d224b21"),
+            File(path: "Preprocessor.mlpackage/Manifest.json", size: 617,
+                 sha256: "f49015764d1241e685821db2253738b10fb6b0f98c6ece34b3ba92b4790bd52d"),
+            File(path: "config.json", size: 3_156,
+                 sha256: "c8bfaab9c017738885809f320f564219ee297f8ea32a2456b1d3abe7cba5ef7e"),
+            File(path: "vocab.json", size: 95_041,
+                 sha256: "6d23d30bfea120aaf0b911a3e2f66a72b011d0722554550b0bce821e1bd6409b"),
+        ])
+
+    /// Locally managed v3 exports. Use `SpeechRecognizer(directory:model:)`.
+    /// This descriptor has no remote repository and supports TDT text only.
+    public static let experimentalParakeetV3 = AsrModel(
+        id: "parakeet-tdt-0.6b-v3-local", repository: "", version: "experimental", revision: "",
+        architecture: .parakeetV3,
+        supportedLanguages: ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
+        capabilities: [.tdt], ctcConfiguration: nil, files: [])
+
+    public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M, .parakeetTdtV3]
 
     public static func named(_ id: String) -> AsrModel? { all.first { $0.id == id } }
 }

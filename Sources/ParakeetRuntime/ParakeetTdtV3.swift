@@ -349,6 +349,10 @@ public final class ParakeetTdtV3 {
 
     private func decodeLongWindow(_ samples: [Float], retryDepth: Int = 0, checkCancellation: () throws -> Void) throws -> Result {
         let first = try autoreleasepool { try decode(samples, checkCancellation: checkCancellation) }
+        return try finishLongWindow(first, samples: samples, retryDepth: retryDepth, checkCancellation: checkCancellation)
+    }
+
+    private func finishLongWindow(_ first: Result, samples: [Float], retryDepth: Int = 0, checkCancellation: () throws -> Void) throws -> Result {
         if retryDepth == 0, requestWindowSamples == 480000, !first.tokenIDs.isEmpty {
             return try recoverPartialBlanks(first, samples: samples, checkCancellation: checkCancellation)
         }
@@ -509,17 +513,19 @@ public final class ParakeetTdtV3 {
         }
     }
 
-    private func decode(_ samples: [Float], checkCancellation: () throws -> Void) throws -> Result {
+    private struct EncodedWindow { let features: MLMultiArray; let frames: Int }
+    private func encode(_ samples: [Float], owned: Bool = false, checkCancellation: () throws -> Void) throws -> EncodedWindow {
         try checkCancellation()
         guard samples.count <= requestWindowSamples, samples.allSatisfy(\.isFinite) else { throw ParakeetError.invalidAudio("Invalid v3 window") }
         diagnostics?("pcm", samples)
         // Fewer than one source mel hop has no valid encoder frames.
-        if samples.count < 160 { return Result(text: "", tokenIDs: [], emissionFrames: []) }
+        if samples.count < 160 { return EncodedWindow(features: try Self.array([1,1024,1]), frames: 0) }
         let models = try windowModels()
         let audio = models.audio, audioLength = models.audioLength
-        Self.zero(audio); Self.zero(hidden); Self.zero(cell)
+        Self.zero(audio)
         samples.withUnsafeBufferPointer { p in audio.dataPointer.assumingMemoryBound(to: Float.self).update(from: p.baseAddress!, count: samples.count) }
         audioLength[0] = NSNumber(value: samples.count)
+        let snapshot = owned ? try Self.array([1,1024,models.window.encoderFrames]) : models.featuresSnapshot
         let frames = try autoreleasepool { () throws -> Int in
             let melOutput = try preprocess(samples, models: models)
             try checkCancellation()
@@ -551,10 +557,19 @@ public final class ParakeetTdtV3 {
             let features = try Self.output(encoded, "encoder", [1,1024,models.window.encoderFrames])
             let frames = try Self.scalarLength(Self.output(encoded, "encoder_length", [1]))
             guard frames == (samples.count / 160 + 7) / 8 else { throw ParakeetError.badConfig("Incorrect v3 encoder valid length") }
-            try withExtendedLifetime((input, firstEncoded, tailInput, encoded, models.encoder, models.encoderTail)) { try Self.copy(features, into: models.featuresSnapshot) }
+            try withExtendedLifetime((input, firstEncoded, tailInput, encoded, models.encoder, models.encoderTail)) { try Self.copy(features, into: snapshot) }
             return frames
         }
-        let features = models.featuresSnapshot
+        return EncodedWindow(features: snapshot, frames: frames)
+    }
+
+    private func decode(_ samples: [Float], checkCancellation: () throws -> Void) throws -> Result {
+        try decodeFeatures(encode(samples, checkCancellation: checkCancellation), checkCancellation: checkCancellation)
+    }
+
+    private func decodeFeatures(_ encoded: EncodedWindow, checkCancellation: () throws -> Void) throws -> Result {
+        Self.zero(hidden); Self.zero(cell)
+        let features = encoded.features, frames = encoded.frames
         diagnose("encoder", features)
         var time = 0, symbols = 0, lastToken = 8192, needsPrediction = true
         var ids: [Int] = [], times: [Int] = []
@@ -737,6 +752,133 @@ public final class ParakeetTdtV3 {
                     throw ParakeetError.badConfig("Unexpected v3 tensor contract: \(name)")
                 }
             }
+        }
+    }
+}
+
+// Research-only: one model set, one encoder producer, one decoder consumer.
+extension ParakeetTdtV3 {
+    public final class OverlapSession {
+        private let runtime: ParakeetTdtV3
+        // Internal deterministic trace mode retains the sequential diagnostic contract.
+        // Never invoke a mutable diagnostic observer concurrently with the producer.
+        var diagnostics: ((String, [Float]) -> Void)? {
+            get { runtime.diagnostics }
+            set { runtime.diagnostics = newValue }
+        }
+        private let queue = DispatchQueue(label: "v3.overlap.encoder")
+        private let requestLock = NSLock()
+        private let peakLock = NSLock()
+        private var queuedPeak = 0
+        public var peakQueuedWindows: Int {peakLock.lock();defer {peakLock.unlock()};return queuedPeak}
+        private func resetPeak() {peakLock.lock();queuedPeak=0;peakLock.unlock()}
+        private func recordPeak(_ count:Int) {peakLock.lock();queuedPeak=max(queuedPeak,count);peakLock.unlock()}
+        public init(directory: URL, cacheDirectory: URL, concurrency: Int = 2, computeUnits: MLComputeUnits = .cpuAndNeuralEngine) throws {
+            guard concurrency == 2 else { throw ParakeetError.badConfig("Overlap has exactly two bounded feature slots") }
+            runtime = try ParakeetTdtV3(directory: directory, computeUnits: computeUnits, cacheDirectory: cacheDirectory, decoderComputeUnits: .cpuOnly)
+        }
+        private struct Job { let samples: [Float]; let start: Int; let right: Int }
+        // Only this synchronized token crosses queues. User cancellation runs on the coordinator.
+        private final class Flight {
+            let group = DispatchGroup(), lock = NSLock()
+            var stopped = false
+            var result: Swift.Result<EncodedWindow,Error>?
+            func stop() { lock.lock(); stopped = true; lock.unlock() }
+            func check() throws { lock.lock(); defer { lock.unlock() }; if stopped { throw CancellationError() } }
+            func store(_ value: Swift.Result<EncodedWindow,Error>) { lock.lock(); result = value; lock.unlock() }
+            func take() throws -> EncodedWindow { lock.lock(); defer { lock.unlock() }; return try result!.get() }
+        }
+        private func launch(_ job: Job) -> Flight {
+            let flight = Flight(), runtime = runtime
+            flight.group.enter()
+            queue.async {
+                defer { flight.group.leave() }
+                let value = Swift.Result {
+                    try autoreleasepool {
+                        runtime.requestWindowSamples = 480000
+                        return try runtime.encode(job.samples, owned: true, checkCancellation: flight.check)
+                    }
+                }
+                flight.store(value)
+            }
+            return flight
+        }
+        private func awaitEncoding(_ flight: Flight, checkCancellation: () throws -> Void) throws -> EncodedWindow {
+            do {
+                while flight.group.wait(timeout: .now() + .milliseconds(10)) == .timedOut { try checkCancellation() }
+                try checkCancellation()
+                return try flight.take()
+            } catch {
+                flight.stop(); flight.group.wait() // Drain before caller can reuse runtime tensors.
+                throw error
+            }
+        }
+        private func run(next: () throws -> Job?, checkCancellation: () throws -> Void) throws -> Result {
+            guard var current = try next() else { return Result(text: "", tokenIDs: [], emissionFrames: []) }
+            runtime.requestWindowSamples = 480000
+            var encoded = try autoreleasepool { try runtime.encode(current.samples, owned: true, checkCancellation: checkCancellation) }
+            var pending: PendingWindow?, ids: [Int] = [], frames: [Int] = []
+            while true {
+                try checkCancellation()
+                let following = try next()
+                let flight = following.map(launch)
+                recordPeak(following == nil ? 1 : 2)
+                let primary: Result
+                let nextEncoded: EncodedWindow?
+                do {
+                    // Decoder touches only its LSTM/projection buffers and the owned current snapshot.
+                    primary = try autoreleasepool { try runtime.decodeFeatures(encoded, checkCancellation: checkCancellation) }
+                    nextEncoded = try flight.map { try awaitEncoding($0, checkCancellation: checkCancellation) }
+                } catch {
+                    if let flight { flight.stop(); flight.group.wait() }
+                    throw error
+                }
+                // Recovery may switch encoder functions. The producer is fully drained first.
+                runtime.requestWindowSamples = 480000
+                let result = try autoreleasepool { try runtime.finishLongWindow(primary, samples: current.samples, checkCancellation: checkCancellation) }
+                ParakeetTdtV3.consume(result, start: current.start, seam: current.start + current.right, pending: &pending, ids: &ids, frames: &frames)
+                guard let following, let nextEncoded else { break }
+                current = following; encoded = nextEncoded
+            }
+            if let last = pending { ParakeetTdtV3.flush(last, through: last.result.tokenIDs.count, ids: &ids, frames: &frames) }
+            return Result(text: runtime.text(ids), tokenIDs: ids, emissionFrames: frames)
+        }
+        public func transcribe(_ samples: [Float], checkCancellation: () throws -> Void = {}) throws -> Result {
+            try checkCancellation()
+            requestLock.lock(); defer { requestLock.unlock() }
+            resetPeak()
+            try checkCancellation()
+            if runtime.diagnostics != nil { return try runtime.transcribe(samples, checkCancellation: checkCancellation) }
+            guard samples.allSatisfy(\.isFinite) else { throw ParakeetError.invalidAudio("PCM samples must be finite") }
+            guard runtime.config.windows != nil, samples.count > 480000 else { return try runtime.transcribe(samples, checkCancellation: checkCancellation) }
+            var start = 0
+            return try run(next: {
+                guard start < samples.count else { return nil }
+                let buffer = Array(samples[start..<min(start+480001,samples.count)])
+                let plan = ParakeetTdtV3.planWindow(buffer, windowSamples: 480000)
+                let job = Job(samples: Array(buffer.prefix(plan.count)), start: start, right: plan.right)
+                start += buffer.count <= 480000 ? buffer.count : plan.advance
+                return job
+            }, checkCancellation: checkCancellation)
+        }
+        public func transcribe(file: URL, checkCancellation: () throws -> Void = {}) throws -> Result {
+            try checkCancellation()
+            requestLock.lock(); defer { requestLock.unlock() }
+            resetPeak()
+            try checkCancellation()
+            if runtime.diagnostics != nil { return try runtime.transcribe(file: file, checkCancellation: checkCancellation) }
+            if runtime.config.windows == nil { return try runtime.transcribe(file: file, checkCancellation: checkCancellation) }
+            let reader = try ParakeetAudio.Reader(file)
+            var buffer = try reader.read(480001), start = 0
+            guard buffer.count > 480000 else { return try runtime.transcribe(buffer, checkCancellation: checkCancellation) }
+            return try run(next: {
+                guard !buffer.isEmpty else { return nil }
+                let plan = ParakeetTdtV3.planWindow(buffer, windowSamples: 480000)
+                let job = Job(samples: Array(buffer.prefix(plan.count)), start: start, right: plan.right)
+                if buffer.count <= 480000 { buffer = [] }
+                else { buffer.removeFirst(plan.advance); buffer.append(contentsOf: try reader.read(plan.advance)); start += plan.advance }
+                return job
+            }, checkCancellation: checkCancellation)
         }
     }
 }

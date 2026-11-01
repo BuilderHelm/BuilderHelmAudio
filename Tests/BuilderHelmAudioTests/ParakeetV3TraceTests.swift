@@ -50,9 +50,7 @@ extension RealModelTests {
         let reference = try JSONDecoder().decode(Reference.self, from: Data(contentsOf: url))
         let digest = SHA256.hash(data: try Data(contentsOf: fixture)).map { String(format: "%02x", $0) }.joined()
         try #require(digest == reference.fixtureSHA256)
-        let original = try await ModelStore.shared.download(.parakeetTdtV3)
-        let directory = ProcessInfo.processInfo.environment["BUILDERHELM_V3_MODEL_DIRECTORY"]
-            .map { URL(fileURLWithPath: $0) } ?? original
+        let directory = try await ModelStore.shared.download(.parakeetTdtV3)
         let runtime = try ParakeetTdtV3(directory: directory, computeUnits: .cpuOnly,
                                        cacheDirectory: ModelStore.shared.compiledModelsDirectory,
                                        decoderComputeUnits: .cpuOnly)
@@ -84,9 +82,7 @@ extension RealModelTests {
 
     /// Trace the actual adapter on SpeechRecognizer's serial queue, including window switches.
     @Test func v3FullDecodeTraceIsRepeatable() async throws {
-        let original = try await ModelStore.shared.download(.parakeetTdtV3)
-        let directory = ProcessInfo.processInfo.environment["BUILDERHELM_V3_MODEL_DIRECTORY"]
-            .map { URL(fileURLWithPath: $0) } ?? original
+        let directory = try await ModelStore.shared.download(.parakeetTdtV3)
         let runtime = try ParakeetV3Runtime(directory: directory, computeUnits: .cpuOnly,
                                             cache: ModelStore.shared.compiledModelsDirectory)
         let log = V3TraceLog()

@@ -44,18 +44,3 @@ jobs:
           key: bhaudio-models-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Sources/BuilderHelmAudio/AsrModel.swift') }}
       - name: Integration tests (rehash cached models, then run real inference)
         run: swift test -c release --filter RealModelTests
-      # Temporary candidate qualification. The pinned export above must still pass
-      # before release; this step tests the frontend repair before publishing it.
-      - name: Python for candidate qualification
-        if: failure()
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.11"
-      - name: Qualify bounded V3 frontend candidate
-        if: failure()
-        run: |
-          python3.11 -m venv "$RUNNER_TEMP/v3-stage-env"
-          "$RUNNER_TEMP/v3-stage-env/bin/pip" install coremltools==9.0 numpy==1.26.4
-          source_model="$(.build/release/bhaudio download parakeet-tdt-0.6b-v3)"
-          "$RUNNER_TEMP/v3-stage-env/bin/python" Scripts/ParakeetV3/stage_preprocessor.py "$source_model" "$RUNNER_TEMP/v3-bounded-candidate"
-          BUILDERHELM_V3_MODEL_DIRECTORY="$RUNNER_TEMP/v3-bounded-candidate" swift test -c release --filter 'RealModelTests/v3'

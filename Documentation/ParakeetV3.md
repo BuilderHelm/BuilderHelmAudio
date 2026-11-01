@@ -1,6 +1,6 @@
 # Parakeet TDT 0.6B v3
 
-BuilderHelmAudio 0.2.0 adds `.parakeetTdtV3`, a pinned conversion of NVIDIA's multilingual Parakeet v3. It ships **unquantized FP16** encoder, predictor and joint weights, with an FP32 frontend and floating-point interfaces. There is no additional training. The download is 1,267,667,816 bytes, plus CoreML's locally compiled cache.
+BuilderHelmAudio 0.2.0 adds `.parakeetTdtV3`, a pinned conversion of NVIDIA's multilingual Parakeet v3. It ships **unquantized FP16** encoder, predictor and joint weights, with an FP32 frontend and floating-point interfaces. There is no additional training. The download is 1,267,682,061 bytes, plus CoreML's locally compiled cache.
 
 ```swift
 let recognizer = try await SpeechRecognizer.load(.parakeetTdtV3)
@@ -13,6 +13,8 @@ The descriptor advertises the checkpoint's 25 languages and TDT text only. `ctcT
 ## Runtime and long recordings
 
 Requests up to 15 seconds use `w15`; longer requests use `w30`. Each frontend/encoder package shares its own constants across both functions. The FP16 Conformer is partitioned into sequential `Encoder` and `EncoderTail` programs, each below 1 GB. This preserves the weights while retaining an approximately 1.27 GB download; the second window adds about 3.3%. The runtime retains the two stages for one window size at a time. Reuse the recognizer; a function switch can incur preparation cost.
+
+The FP32 frontend extracts at most 401 raw log-mel frames per DFT prediction, then normalizes the assembled complete 15/30-second window. Pre-emphasis is evaluated in FP32 in the runtime. All weight bytes and the original frontend functions are preserved. This bounded path makes repeated full decoding stable on the hosted macOS 15 CPU runner; frozen features match the validated full-window reference within 0.0000005. The older model 1.0.0 remains immutable for reproduction.
 
 Files are read in bounded blocks of at most 480,001 input samples, with no fixed SDK recording-duration limit. The caller owns the full array when using the PCM API. Encoder outputs are consumed one window at a time. Model-load/feature temporaries are drained and compiled package URLs are cached per recognizer. Owned inputs and feature snapshots use page-aligned storage; model-returned tensors are read inside scoped buffer access. Partitioned encoder stages use framework-managed outputs and default prediction options. The stage boundary retains its producers until the final features are copied into owned storage. Existing single-encoder exports retain their CPU/Neural Engine output-buffer reuse.
 
@@ -61,7 +63,7 @@ The target is **all Apple Silicon Macs, M1 onward, running macOS 15+**, plus iOS
 
 The default requests CPU plus Neural Engine for the encoder, and CPU for the frontend, predictor and joint. Per-operation placement is determined by CoreML. CPU is also available on iOS. GPU encoder mode is supported on Mac; V3 GPU requests on iOS fail during loading with an explicit error because repeated device diagnostics stalled on long-window switching. Hosted CI proves compilation, CPU inference and SDK behavior; it does not establish Neural Engine or physical-device performance.
 
-The production-SDK iPhone 13 run completed 172 paced requests over 20.0 minutes: 174 ms median, 210 ms p95 and 872 ms maximum, with 0 requests over one second. Repeated transcripts stayed stable and the app remained active. Thermal state stayed at or below fair. All 63 following long-file requests completed. File/PCM reuse, short reuse after long audio and long silence checks passed. Phone WER was 11.98% on the 18 natural confirmation excerpts, 1.83% on Long20 and 13.44% on 25 multilingual long composites. This is paced dictation followed by a bounded long batch; it does not measure all-day thermals or inference energy.
+The production-SDK iPhone 13 run completed 172 paced requests over 20.0 minutes: 177 ms median, 215 ms p95 and 327 ms maximum, with 0 requests over one second. Repeated transcripts stayed stable and the app remained active. Thermal state stayed at or below fair. All 63 following long-file requests completed. File/PCM reuse, short reuse after long audio and long silence checks passed. Phone WER was 11.98% on the 18 natural confirmation excerpts, 1.83% on Long20 and 13.44% on 25 multilingual long composites. This is paced dictation followed by a bounded long batch; it does not measure all-day thermals or inference energy.
 
 Warm fixture timings and cold compilation/preparation costs are reported separately in the model card. Reusing a recognizer avoids repeated package loading; function changes can still require preparation. These small synthetic fixtures do not predict every recording's latency.
 

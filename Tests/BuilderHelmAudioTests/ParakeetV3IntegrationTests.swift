@@ -91,12 +91,7 @@ extension RealModelTests {
         let store = ModelStore.shared
         _ = try await store.download(descriptor)
         #expect(try await store.verify(descriptor))
-        let recognizer: SpeechRecognizer
-        if let path = ProcessInfo.processInfo.environment["BUILDERHELM_V3_MODEL_DIRECTORY"] {
-            recognizer = try SpeechRecognizer(directory: URL(fileURLWithPath: path), model: descriptor, computeUnits: realModelTestComputeUnits)
-        } else {
-            recognizer = try await SpeechRecognizer.load(descriptor, computeUnits: realModelTestComputeUnits)
-        }
+        let recognizer = try await SpeechRecognizer.load(descriptor, computeUnits: realModelTestComputeUnits)
         #expect(recognizer.capabilities == [.tdt])
         #expect(recognizer.keywordSpotterIfAvailable == nil)
         var shortText: String?

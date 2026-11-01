@@ -118,7 +118,7 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
         id: "parakeet-tdt-0.6b-v3",
         repository: "BuilderHelm/Parakeet-TDT-0.6B-V3-CoreML",
         version: "1.0.0",
-        revision: "7f5e3fd434ac9858703b800dc1bcb2ccd8122f93",
+        revision: "f3bffd4a38650110081d9b8fdca6130a1c21f2ad",
         architecture: .parakeetV3,
         supportedLanguages: ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
         capabilities: [.tdt], ctcConfiguration: nil,

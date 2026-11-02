@@ -43,6 +43,11 @@ public final class ParakeetTdtV3 {
     private let encoderComputeUnits: MLComputeUnits
     private var requestWindowSamples = 240000
     private var activeWindow: WindowModels?
+    #if os(macOS)
+    // Each recognizer retains the two existing function sets, with private model buffers.
+    // iOS retains the previously qualified one-active-function policy.
+    private var retainedWindows: [Int: WindowModels] = [:]
+    #endif
     // Internal integration-test probe; absent during normal inference.
     var diagnostics: ((String, [Float]) -> Void)?
     private final class WindowModels {
@@ -177,6 +182,12 @@ public final class ParakeetTdtV3 {
     }
     private func windowModels() throws -> WindowModels {
         if activeWindow?.window.samples == requestWindowSamples { return activeWindow! }
+        #if os(macOS)
+        if let retained = retainedWindows[requestWindowSamples] {
+            activeWindow = retained
+            return retained
+        }
+        #endif
         // Retain one encoder function at a time to bound device memory.
         autoreleasepool { activeWindow = nil }
         let window = config.windows?.first(where: { $0.samples == requestWindowSamples })
@@ -193,6 +204,9 @@ public final class ParakeetTdtV3 {
             }
             return try WindowModels(window:window,frontend:load("Preprocessor",.cpuOnly),encoder:load("Encoder",encoderComputeUnits),encoderTail:encoderTailURL == nil ? nil : load("EncoderTail",encoderComputeUnits),stagedPreprocessor:config.staged_preprocessor == true)
         }
+        #if os(macOS)
+        retainedWindows[requestWindowSamples] = current
+        #endif
         activeWindow = current
         return current
     }

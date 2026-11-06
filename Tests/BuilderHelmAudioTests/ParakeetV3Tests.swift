@@ -266,8 +266,12 @@ import Testing
     let manifest = ["Joint.mlpackage/Manifest.json": a, "Joint.mlpackage/Data/weight.bin": b]
     let key = try #require(try ParakeetTdtCtc110M.manifestHash(package, manifest))
     #expect(key.count == 16)
-    #expect(key != (try ParakeetTdtCtc110M.contentHash(package)))
-    #expect(try ParakeetTdtCtc110M.manifestHash(package, manifest.merging(["Joint.mlpackage/Manifest.json": b]) { $1 }) != key)
+    // Computed outside #expect: Swift 6.0's macro rejects `try` inside a comparison.
+    let content = try ParakeetTdtCtc110M.contentHash(package)
+    let changed = try ParakeetTdtCtc110M.manifestHash(package, manifest.merging(["Joint.mlpackage/Manifest.json": b]) { $1 })
+    #expect(key != content)
+    #expect(changed != key)
     try Data("x".utf8).write(to: package.appendingPathComponent("Data/extra.bin"))
-    #expect(try ParakeetTdtCtc110M.manifestHash(package, manifest) == nil)
+    let incomplete = try ParakeetTdtCtc110M.manifestHash(package, manifest)
+    #expect(incomplete == nil)
 }

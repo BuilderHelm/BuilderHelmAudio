@@ -74,6 +74,96 @@ private func fixture(corrupt: Bool = false) throws -> (store: ModelStore, model:
     #expect(Set(AsrModel.all.map(\.id)).count == AsrModel.all.count)
 }
 
+@Test func sameRepositoryRevisionVariantsHaveIndependentLifecycles() async throws {
+    let (store, original, root) = try fixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let bytes = Data("quantized fixture".utf8)
+    let remotePath = "variants/palette6/config.json"
+    let served = root.appendingPathComponent("hub/\(original.repository)/resolve/\(original.revision)/\(remotePath)")
+    try FileManager.default.createDirectory(at: served.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try bytes.write(to: served)
+    let quantized = AsrModel(
+        id: "test-palette6", repository: original.repository, version: original.version,
+        revision: original.revision, architecture: original.architecture,
+        supportedLanguages: original.supportedLanguages, capabilities: original.capabilities,
+        ctcConfiguration: original.ctcConfiguration,
+        files: [.init(path: "config.json", size: Int64(bytes.count), sha256: sha256(bytes), repositoryPath: remotePath),
+                original.files.first!], variant: "palette6")
+    let originalDirectory = store.directory(for: original)
+    #expect(originalDirectory == root.appendingPathComponent("store/Models/Test/Model/\(original.revision)", isDirectory: true))
+    #expect(store.directory(for: quantized) != originalDirectory)
+
+    try await store.download(quantized)
+    let downloadedConfig = try Data(contentsOf: store.directory(for: quantized).appendingPathComponent("config.json"))
+    #expect(downloadedConfig == bytes)
+    #expect(FileManager.default.fileExists(atPath: store.directory(for: quantized).appendingPathComponent(original.files.first!.path).path))
+    #expect(store.isDownloaded(quantized))
+    #expect(!store.isDownloaded(original))
+    #expect(!FileManager.default.fileExists(atPath: originalDirectory.path))
+    try await store.download(original)
+    #expect(try await store.verify(original))
+    #expect(try await store.verify(quantized))
+
+    // A same-size corruption invalidates only this variant, and can be repaired independently.
+    let quantizedConfig = store.directory(for: quantized).appendingPathComponent("config.json")
+    try Data(repeating: 0, count: bytes.count).write(to: quantizedConfig)
+    let corruptedVerifies = try await store.verify(quantized)
+    #expect(!corruptedVerifies)
+    #expect(!store.isDownloaded(quantized))
+    #expect(store.isDownloaded(original))
+    #expect(try await store.verify(original))
+    try await store.download(quantized)
+    #expect(try await store.verify(quantized))
+
+    // Legacy removal must not recursively remove the explicit variant at the same revision.
+    try await store.remove(original)
+    #expect(!store.isDownloaded(original))
+    #expect(try await store.verify(quantized))
+    #expect(store.isDownloaded(quantized))
+    try await store.download(original)
+    try await store.remove(quantized)
+    #expect(!store.isDownloaded(quantized))
+    #expect(store.isDownloaded(original))
+    #expect(try await store.verify(original))
+}
+
+@Test func explicitVariantsDoNotShareReadinessOrFiles() async throws {
+    let (store, original, root) = try fixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    func variant(_ name: String, contents: Data) -> AsrModel {
+        AsrModel(id: "test-\(name)", repository: original.repository, version: original.version,
+                 revision: original.revision, architecture: original.architecture,
+                 supportedLanguages: original.supportedLanguages, capabilities: original.capabilities,
+                 ctcConfiguration: original.ctcConfiguration,
+                 files: [.init(path: "config.json", size: Int64(contents.count), sha256: sha256(contents),
+                               repositoryPath: "variants/\(name)/config.json")], variant: name)
+    }
+    let firstBytes = Data("first".utf8), secondBytes = Data("other".utf8)
+    let first = variant("palette6", contents: firstBytes)
+    let second = variant("linear8", contents: secondBytes)
+    func serve(_ model: AsrModel, _ data: Data) throws {
+        let url = root.appendingPathComponent("hub/\(model.repository)/resolve/\(model.revision)/\(model.files[0].repositoryPath)")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url)
+    }
+    try serve(first, firstBytes)
+    // The unselected variant does not exist on the server yet. Downloading the first must still succeed.
+    try await store.download(first)
+    #expect(store.isDownloaded(first))
+    #expect(!store.isDownloaded(second))
+    #expect(!FileManager.default.fileExists(atPath: store.directory(for: second).path))
+    try serve(second, secondBytes)
+    try await store.download(second)
+    let firstConfig = try Data(contentsOf: store.directory(for: first).appendingPathComponent("config.json"))
+    let secondConfig = try Data(contentsOf: store.directory(for: second).appendingPathComponent("config.json"))
+    #expect(firstConfig == firstBytes)
+    #expect(secondConfig == secondBytes)
+    try await store.remove(first)
+    #expect(!store.isDownloaded(first))
+    #expect(store.isDownloaded(second))
+    #expect(try await store.verify(second))
+}
+
 final class Counter: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Int64 = 0

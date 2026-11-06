@@ -4,9 +4,19 @@ import Foundation
 public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
     /// A file in the model repository, with the size and SHA-256 it must have after download.
     public struct File: Sendable, Hashable {
+        /// Path inside the local model folder, where the runtime expects this file.
         public let path: String
+        /// Path in the pinned repository; may point into a variant subfolder or a shared package.
+        public let repositoryPath: String
         public let size: Int64
         public let sha256: String
+
+        init(path: String, size: Int64, sha256: String, repositoryPath: String? = nil) {
+            self.path = path
+            self.repositoryPath = repositoryPath ?? path
+            self.size = size
+            self.sha256 = sha256
+        }
     }
 
     /// Stable identifier, used by the CLI and the cache.
@@ -17,6 +27,9 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
     public let version: String
     /// Full commit hash. Downloads use this, so a moved tag or branch cannot change the files.
     public let revision: String
+    /// Optional artifact variant within a repository revision. Nil preserves the original cache path.
+    /// Variants have independent download, verification and removal lifecycles.
+    public let variant: String?
     public let architecture: AsrArchitecture
     /// BCP-47 language codes advertised by this model.
     public let supportedLanguages: [String]
@@ -32,11 +45,13 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
     public var maxRequestDuration: TimeInterval? { nil }
 
     init(id: String, repository: String, version: String, revision: String, architecture: AsrArchitecture,
-         supportedLanguages: [String], capabilities: AsrCapabilities, ctcConfiguration: CtcConfiguration?, files: [File]) {
+         supportedLanguages: [String], capabilities: AsrCapabilities, ctcConfiguration: CtcConfiguration?, files: [File],
+         variant: String? = nil) {
         self.id = id
         self.repository = repository
         self.version = version
         self.revision = revision
+        self.variant = variant
         self.architecture = architecture
         self.supportedLanguages = supportedLanguages
         self.capabilities = capabilities

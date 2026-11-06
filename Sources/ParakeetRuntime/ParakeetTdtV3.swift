@@ -787,8 +787,12 @@ public final class ParakeetTdtV3 {
 
     /// Indices of the `k` best scores, ties to the lower index.
     static func topK(_ scores: [Float], count n: Int, _ k: Int) -> [(score: Float, index: Int)] {
-        let ranked = (0..<n).map { (score: scores[$0], index: $0) }
-            .sorted { $0.score != $1.score ? $0.score > $1.score : $0.index < $1.index }
+        // Typed and split up: Swift 6.0 and 6.1 time out inferring the chain.
+        var ranked: [(score: Float, index: Int)] = (0..<n).map { (score: scores[$0], index: $0) }
+        ranked.sort { (a: (score: Float, index: Int), b: (score: Float, index: Int)) -> Bool in
+            if a.score != b.score { return a.score > b.score }
+            return a.index < b.index
+        }
         return Array(ranked.prefix(min(n, k)))
     }
 

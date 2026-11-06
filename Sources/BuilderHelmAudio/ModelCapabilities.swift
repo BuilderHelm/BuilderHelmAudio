@@ -22,9 +22,12 @@ public struct AsrCapabilities: OptionSet, Hashable, Sendable {
     public static let wordTimestamps = Self(rawValue: 1 << 3)
     public static let segmentTimestamps = Self(rawValue: 1 << 4)
     public static let keywordSpotting = Self(rawValue: 1 << 5)
+    /// Ranked TDT beam-search alternatives (`SpeechRecognizer.alternatives`).
+    public static let rankedAlternatives = Self(rawValue: 1 << 6)
 
     static let parakeet110MTdt: Self = [.tdt, .ctc, .tokenTimestamps, .keywordSpotting]
     static let parakeet110MCtc: Self = [.ctc, .keywordSpotting]
+    static let parakeetV3Tdt: Self = [.tdt, .tokenTimestamps, .wordTimestamps, .rankedAlternatives]
 }
 
 /// Layout of one model's CTC frames. Vocabulary pieces omit the blank class.

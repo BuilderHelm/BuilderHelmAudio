@@ -346,13 +346,17 @@ public final class ParakeetTdtCtc110M {
     /// `cache/<name>-<content hash>-<macOS build>/` and reused from that fixed path:
     /// Core ML caches each Neural Engine function by model path, so a fresh
     /// temporary path re-pays about 5 s per encoder function on every launch.
-    static func modelURL(_ directory: URL, _ name: String, cache: URL, allowBundledCompiled: Bool = true) throws -> URL {
+    /// `manifest` (directory-relative path → SHA-256, already verified by the caller) names the
+    /// entry without reading the package, when it lists every file in it.
+    static func modelURL(_ directory: URL, _ name: String, cache: URL, allowBundledCompiled: Bool = true,
+                         manifest: [String: String]? = nil) throws -> URL {
         let fm = FileManager.default
         let bundled = directory.appendingPathComponent(name + ".mlmodelc")
         if allowBundledCompiled && fm.fileExists(atPath: bundled.path) { return bundled }
         let package = directory.appendingPathComponent(name + ".mlpackage")
         guard fm.fileExists(atPath: package.path) else { throw ParakeetError.missingModel(name) }
-        let prefix = "\(name)-\(try contentHash(package))-"
+        let hash = try manifest.flatMap { try manifestHash(package, $0) } ?? contentHash(package)
+        let prefix = "\(name)-\(hash)-"
         let entry = cache.appendingPathComponent(prefix + osBuild(), isDirectory: true)
         let url = entry.appendingPathComponent(name + ".mlmodelc")
         if fm.fileExists(atPath: url.path) { return url }
@@ -375,8 +379,32 @@ public final class ParakeetTdtCtc110M {
         return url
     }
 
-    /// SHA-256 over each file's relative path and bytes (about 0.1 s for all four packages on M5).
+    /// SHA-256 over each file's relative path and bytes (about 0.1 s for the 110M packages on M5,
+    /// 0.5–1 s for the 0.6B V3 export).
     static func contentHash(_ package: URL) throws -> String {
+        var hash = SHA256()
+        for (path, url) in try packageFiles(package) {
+            let data = try Data(contentsOf: url, options: .alwaysMapped)
+            hash.update(data: Data("\(path)\u{0}\(data.count)\u{0}".utf8))
+            hash.update(data: data)
+        }
+        return hash.finalize().prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// SHA-256 over each file's relative path and manifest checksum, without reading the files.
+    /// Nil if the manifest misses a file in the package.
+    static func manifestHash(_ package: URL, _ manifest: [String: String]) throws -> String? {
+        var hash = SHA256()
+        hash.update(data: Data("manifest\u{0}".utf8))
+        for (path, _) in try packageFiles(package) {
+            guard let expected = manifest[package.lastPathComponent + "/" + path] else { return nil }
+            hash.update(data: Data("\(path)\u{0}\(expected)\u{0}".utf8))
+        }
+        return hash.finalize().prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Regular files in a package with their package-relative paths, sorted by path.
+    static func packageFiles(_ package: URL) throws -> [(String, URL)] {
         let root = package.resolvingSymlinksInPath()
         guard let walk = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey])
         else { throw ParakeetError.missingModel(package.lastPathComponent) }
@@ -385,13 +413,7 @@ public final class ParakeetTdtCtc110M {
             let path = url.resolvingSymlinksInPath().pathComponents.dropFirst(root.pathComponents.count)
             files.append((path.joined(separator: "/"), url))
         }
-        var hash = SHA256()
-        for (path, url) in files.sorted(by: { $0.0 < $1.0 }) {
-            let data = try Data(contentsOf: url, options: .alwaysMapped)
-            hash.update(data: Data("\(path)\u{0}\(data.count)\u{0}".utf8))
-            hash.update(data: data)
-        }
-        return hash.finalize().prefix(8).map { String(format: "%02x", $0) }.joined()
+        return files.sorted { $0.0 < $1.0 }
     }
 
     /// macOS build, e.g. "27C5048a"; a new build gets a fresh compile.

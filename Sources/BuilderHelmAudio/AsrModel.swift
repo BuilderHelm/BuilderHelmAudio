@@ -112,8 +112,8 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
                  sha256: "ecbc3fe1c391a3feea1d1c39f8c15af674bd03cbaf0d0f5de4a564771c16bd16"),
         ])
 
-    /// Multilingual Parakeet TDT 0.6B v3: FP16 text recognition in 25 languages.
-    /// Offline recordings use shared-weight 15/30-second windows. No CTC or aligned timestamps.
+    /// Multilingual Parakeet TDT 0.6B v3: FP16 text recognition in 25 languages, with NeMo-compatible
+    /// token and word timestamps and confidences. Offline recordings use shared-weight 15/30-second windows. No CTC.
     public static let parakeetTdtV3 = AsrModel(
         id: "parakeet-tdt-0.6b-v3",
         repository: "BuilderHelm/Parakeet-TDT-0.6B-V3-CoreML",
@@ -121,7 +121,7 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
         revision: "3578e62cd8d94e56337bcc23e8b21e7f25617fbf",
         architecture: .parakeetV3,
         supportedLanguages: ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
-        capabilities: [.tdt], ctcConfiguration: nil,
+        capabilities: .parakeetV3Tdt, ctcConfiguration: nil,
         files: [
             File(path: "Encoder.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 581_731,
                  sha256: "fe8c3ea5143cfbc6b807eb906ad1df7839da24bb00d3ec1c7f626d28fb7904f6"),
@@ -160,12 +160,12 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
         ])
 
     /// Locally managed v3 exports. Use `SpeechRecognizer(directory:model:)`.
-    /// This descriptor has no remote repository and supports TDT text only.
+    /// This descriptor has no remote repository and supports TDT text, token and word timestamps.
     public static let experimentalParakeetV3 = AsrModel(
         id: "parakeet-tdt-0.6b-v3-local", repository: "", version: "experimental", revision: "",
         architecture: .parakeetV3,
         supportedLanguages: ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
-        capabilities: [.tdt], ctcConfiguration: nil, files: [])
+        capabilities: .parakeetV3Tdt, ctcConfiguration: nil, files: [])
 
     public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M, .parakeetTdtV3]
 

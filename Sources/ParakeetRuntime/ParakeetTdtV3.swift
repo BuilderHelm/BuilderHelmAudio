@@ -4,12 +4,47 @@ import Foundation
 import Darwin
 
 /// Offline v3 runtime with bounded windows. Serialize calls on each instance.
-/// Transcript text is supported; emission frames are internal window-ownership markers, not aligned word times.
+/// Each token carries NeMo's TDT timing (emission frame and predicted duration, 80 ms frames)
+/// and `max_prob` confidence, from which `words(_:)` builds word timestamps.
 public final class ParakeetTdtV3 {
     public struct Result {
         public let text: String
         public let tokenIDs: [Int]
+        /// Encoder frame (80 ms) at which each token was emitted, from the start of the audio.
         public let emissionFrames: [Int]
+        /// Frames each token covers: the TDT duration predicted with it (0...4).
+        public let durations: [Int]
+        /// NeMo `max_prob` confidence of each token, (N·p − 1)/(N − 1) over tokens and blank.
+        public let confidences: [Float]
+
+        /// Durations and confidences default to 1 for results built without them (window tests).
+        public init(text: String, tokenIDs: [Int], emissionFrames: [Int], durations: [Int]? = nil, confidences: [Float]? = nil) {
+            self.text = text
+            self.tokenIDs = tokenIDs
+            self.emissionFrames = emissionFrames
+            self.durations = durations ?? Array(repeating: 1, count: tokenIDs.count)
+            self.confidences = confidences ?? Array(repeating: 1, count: tokenIDs.count)
+        }
+    }
+
+    /// Tokens collected from one or more windows, in audio order.
+    struct TokenTrack {
+        var ids: [Int] = [], frames: [Int] = [], durations: [Int] = [], confidences: [Float] = []
+
+        mutating func append(_ result: Result, at index: Int, frameOffset: Int = 0) {
+            ids.append(result.tokenIDs[index])
+            frames.append(frameOffset + result.emissionFrames[index])
+            durations.append(result.durations[index])
+            confidences.append(result.confidences[index])
+        }
+
+        mutating func append(_ result: Result, frameOffset: Int = 0) {
+            for index in result.tokenIDs.indices { append(result, at: index, frameOffset: frameOffset) }
+        }
+
+        func result(text: String) -> Result {
+            Result(text: text, tokenIDs: ids, emissionFrames: frames, durations: durations, confidences: confidences)
+        }
     }
     struct Window: Decodable {
         let samples: Int
@@ -35,6 +70,7 @@ public final class ParakeetTdtV3 {
     private let allowExperimentalLongAudio: Bool
     private let config: Config
     private let pieces: [String]
+    private var wordPunctuation: Set<String> = []
     private let predictor: MLModel, joint: MLModel
     private let frontendURL: URL, encoderURL: URL
     private let featureExtractor: MLModel?
@@ -123,35 +159,23 @@ public final class ParakeetTdtV3 {
                 }
             }
         }
-        for (path, expected) in config.files {
-            guard !path.hasPrefix("/"), !path.split(separator: "/").contains(".."), expected.count == 64 else {
-                throw ParakeetError.badConfig("Invalid model manifest path or checksum")
-            }
-            let url = directory.appendingPathComponent(path)
-            let file = try FileHandle(forReadingFrom: url)
-            defer { try? file.close() }
-            var hash = SHA256()
-            while try autoreleasepool(invoking: { () throws -> Bool in
-                guard let bytes = try file.read(upToCount: 8 * 1024 * 1024), !bytes.isEmpty else { return false }
-                hash.update(data: bytes); return true
-            }) {}
-            guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == expected else {
-                throw ParakeetError.badConfig("Checksum mismatch: \(path)")
-            }
-        }
+        let manifest = config.files
+        try Self.verify(manifest, in: directory, cache: cacheDirectory)
         pieces = try decoder.decode([String].self, from: Data(contentsOf: directory.appendingPathComponent("vocab.json")))
         guard pieces.count == 8192, pieces.first == "<unk>" else { throw ParakeetError.badConfig("Expected 8192 tokenizer pieces") }
+        wordPunctuation = ParakeetWords.punctuation(in: pieces)
         func load(_ name: String, _ units: MLComputeUnits) throws -> MLModel {
             try autoreleasepool {
-                let url = try ParakeetTdtCtc110M.modelURL(directory, name, cache: cacheDirectory, allowBundledCompiled: false)
+                let url = try ParakeetTdtCtc110M.modelURL(directory, name, cache: cacheDirectory, allowBundledCompiled: false,
+                                                                manifest: manifest)
                 return try ParakeetTdtCtc110M.load(url, units, nil)
             }
         }
         let hasTail = config.encoder_stages != nil
         let compiled = try autoreleasepool { () throws -> (URL,URL,URL?) in
-            let front = try ParakeetTdtCtc110M.modelURL(directory,"Preprocessor",cache:cacheDirectory,allowBundledCompiled:false)
-            let enc = try ParakeetTdtCtc110M.modelURL(directory,"Encoder",cache:cacheDirectory,allowBundledCompiled:false)
-            let tail = hasTail ? try ParakeetTdtCtc110M.modelURL(directory,"EncoderTail",cache:cacheDirectory,allowBundledCompiled:false) : nil
+            let front = try ParakeetTdtCtc110M.modelURL(directory,"Preprocessor",cache:cacheDirectory,allowBundledCompiled:false,manifest:manifest)
+            let enc = try ParakeetTdtCtc110M.modelURL(directory,"Encoder",cache:cacheDirectory,allowBundledCompiled:false,manifest:manifest)
+            let tail = hasTail ? try ParakeetTdtCtc110M.modelURL(directory,"EncoderTail",cache:cacheDirectory,allowBundledCompiled:false,manifest:manifest) : nil
             return (front,enc,tail)
         }
         frontendURL = compiled.0; encoderURL = compiled.1; encoderTailURL = compiled.2
@@ -170,6 +194,48 @@ public final class ParakeetTdtV3 {
         _ = try windowModels()
         try Self.validate(predictor, inputs: ["targets": [1,1], "h_in": [2,1,640], "c_in": [2,1,640]], outputs: ["decoder": [1,640,1], "h_out": [2,1,640], "c_out": [2,1,640]])
         try Self.validate(joint, inputs: ["encoder_step": [1,1024,1], "decoder_step": [1,640,1]], outputs: ["logits": [1,1,1,8198]])
+    }
+
+    /// Checks every manifest file against its SHA-256. A passing check is recorded in the cache with
+    /// each file's device, inode, size and modification and change times, so later loads of the same
+    /// unchanged files only stat them (hashing the FP16 export takes about 0.6 s). Writing, replacing or
+    /// touching any file, or a different manifest, hashes everything again.
+    static func verify(_ files: [String: String], in directory: URL, cache: URL) throws {
+        let manifest = files.sorted { $0.key < $1.key }
+        for (path, expected) in manifest {
+            guard !path.hasPrefix("/"), !path.split(separator: "/").contains(".."), expected.count == 64 else {
+                throw ParakeetError.badConfig("Invalid model manifest path or checksum")
+            }
+        }
+        // Taken before hashing, so a file changed while it is read fails the next comparison.
+        let identity = Data(manifest.map { path, expected in
+            "\(path)\t\(expected)\t\(fileIdentity(directory.appendingPathComponent(path)) ?? "missing")\n"
+        }.joined().utf8)
+        let key = SHA256.hash(data: Data(directory.resolvingSymlinksInPath().path.utf8))
+        let record = cache.appendingPathComponent("verified-" + key.prefix(8).map { String(format: "%02x", $0) }.joined())
+        if (try? Data(contentsOf: record)) == identity { return }
+        for (path, expected) in manifest {
+            let file = try FileHandle(forReadingFrom: directory.appendingPathComponent(path))
+            defer { try? file.close() }
+            var hash = SHA256()
+            while try autoreleasepool(invoking: { () throws -> Bool in
+                guard let bytes = try file.read(upToCount: 8 * 1024 * 1024), !bytes.isEmpty else { return false }
+                hash.update(data: bytes); return true
+            }) {}
+            guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == expected else {
+                throw ParakeetError.badConfig("Checksum mismatch: \(path)")
+            }
+        }
+        // Best effort: an unwritable cache hashes on every load.
+        try? FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        try? identity.write(to: record, options: .atomic)
+    }
+
+    static func fileIdentity(_ url: URL) -> String? {
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { return nil }
+        return "\(info.st_dev):\(info.st_ino):\(info.st_size):\(info.st_mtimespec.tv_sec).\(info.st_mtimespec.tv_nsec)"
+            + ":\(info.st_ctimespec.tv_sec).\(info.st_ctimespec.tv_nsec)"
     }
 
     private func windowSize(for count: Int) -> Int {
@@ -202,7 +268,7 @@ public final class ParakeetTdtV3 {
         let reader = try ParakeetAudio.Reader(file)
         var buffer = try reader.read(config.windows == nil ? 240001 : 480001), start = 0
         requestWindowSamples = windowSize(for: buffer.count)
-        var allIDs: [Int] = [], allFrames: [Int] = []
+        var track = TokenTrack()
         var pending: PendingWindow?
         try Self.validateSampleCount(buffer.count, allowLongAudio: allowExperimentalLongAudio)
         // Keep short file and PCM requests on exactly the same decode path.
@@ -217,14 +283,14 @@ public final class ParakeetTdtV3 {
             try checkCancellation()
             let plan = Self.planWindow(buffer, windowSamples: requestWindowSamples)
             let window = try autoreleasepool { try decodeLongWindow(Array(buffer.prefix(plan.count)), checkCancellation: checkCancellation) }
-            Self.consume(window, start: start, seam: start + plan.right, pending: &pending, ids: &allIDs, frames: &allFrames)
+            Self.consume(window, start: start, seam: start + plan.right, pending: &pending, track: &track)
             if buffer.count <= requestWindowSamples { break }
             buffer.removeFirst(plan.advance)
             buffer.append(contentsOf: try reader.read(plan.advance))
             start += plan.advance
         }
-        if let last = pending { Self.flush(last, through: last.result.tokenIDs.count, ids: &allIDs, frames: &allFrames) }
-        return Result(text: text(allIDs), tokenIDs: allIDs, emissionFrames: allFrames)
+        if let last = pending { Self.flush(last, through: last.result.tokenIDs.count, track: &track) }
+        return track.result(text: text(track.ids))
     }
 
     public func transcribe(_ samples: [Float], checkCancellation: () throws -> Void = {}) throws -> Result {
@@ -238,19 +304,19 @@ public final class ParakeetTdtV3 {
                     : decode(samples, checkCancellation: checkCancellation)
             }
         }
-        var start = 0, allIDs: [Int] = [], allFrames: [Int] = []
+        var start = 0, track = TokenTrack()
         var pending: PendingWindow?
         while start < samples.count {
             try checkCancellation()
             let buffer = Array(samples[start..<min(start + requestWindowSamples + 1, samples.count)])
             let plan = Self.planWindow(buffer, windowSamples: requestWindowSamples)
             let window = try autoreleasepool { try decodeLongWindow(Array(buffer.prefix(plan.count)), checkCancellation: checkCancellation) }
-            Self.consume(window, start: start, seam: start + plan.right, pending: &pending, ids: &allIDs, frames: &allFrames)
+            Self.consume(window, start: start, seam: start + plan.right, pending: &pending, track: &track)
             if buffer.count <= requestWindowSamples { break }
             start += plan.advance
         }
-        if let last = pending { Self.flush(last, through: last.result.tokenIDs.count, ids: &allIDs, frames: &allFrames) }
-        return Result(text: text(allIDs), tokenIDs: allIDs, emissionFrames: allFrames)
+        if let last = pending { Self.flush(last, through: last.result.tokenIDs.count, track: &track) }
+        return track.result(text: text(track.ids))
     }
 
     struct WindowPlan { let count: Int; let advance: Int; let right: Int }
@@ -293,19 +359,18 @@ public final class ParakeetTdtV3 {
         let first: Int
         let seam: Int
     }
-    private static func flush(_ window: PendingWindow, through end: Int, ids: inout [Int], frames: inout [Int]) {
+    private static func flush(_ window: PendingWindow, through end: Int, track: inout TokenTrack) {
         for index in window.first..<max(window.first, end) {
-            ids.append(window.result.tokenIDs[index])
-            frames.append(window.start/1280 + window.result.emissionFrames[index])
+            track.append(window.result, at: index, frameOffset: window.start/1280)
         }
     }
     private static func consume(_ result: Result, start: Int, seam: Int, pending: inout PendingWindow?,
-                                ids: inout [Int], frames: inout [Int]) {
+                                track: inout TokenTrack) {
         var first = 0
         if let previous = pending {
             let cut = join(previous.result, previousStart:previous.start, previousFirst:previous.first,
                            next:result, nextStart:start, seam:previous.seam)
-            flush(previous, through:cut.previousEnd, ids:&ids, frames:&frames)
+            flush(previous, through:cut.previousEnd, track:&track)
             first = cut.nextBegin
         }
         pending = PendingWindow(result:result,start:start,first:first,seam:seam)
@@ -365,8 +430,10 @@ public final class ParakeetTdtV3 {
         let right = try retryDepth < 1
             ? decodeLongWindow(Array(samples[cut...]), retryDepth: retryDepth + 1, checkCancellation: checkCancellation)
             : decode(Array(samples[cut...]), checkCancellation: checkCancellation)
-        let ids = left.tokenIDs + right.tokenIDs
-        return Result(text: text(ids), tokenIDs: ids, emissionFrames: left.emissionFrames + right.emissionFrames.map { $0 + cut / 1280 })
+        var track = TokenTrack()
+        track.append(left)
+        track.append(right, frameOffset: cut / 1280)
+        return track.result(text: text(track.ids))
     }
 
     struct BlankSpan { let index: Int; let left: Int; let right: Int }
@@ -399,7 +466,7 @@ public final class ParakeetTdtV3 {
     }
 
     /// Keep every primary token; fill only gaps bounded by matching tokens at the same audio time.
-    static func insertRecoveredTokens(_ primary: Result, candidate: Result, gaps: [BlankSpan]) -> (ids: [Int], frames: [Int])? {
+    static func insertRecoveredTokens(_ primary: Result, candidate: Result, gaps: [BlankSpan]) -> Result? {
         guard !primary.tokenIDs.isEmpty, primary.tokenIDs.count == primary.emissionFrames.count,
               candidate.tokenIDs.count == candidate.emissionFrames.count else { return nil }
         let candidateIDs = candidate.tokenIDs, candidateFrames = candidate.emissionFrames
@@ -432,12 +499,12 @@ public final class ParakeetTdtV3 {
             insertions[gap.index] = begin..<end
         }
         guard !insertions.isEmpty else { return nil }
-        var ids: [Int] = [], times: [Int] = []
+        var track = TokenTrack()
         for i in 0...primary.tokenIDs.count {
-            if let added = insertions[i] { ids += candidateIDs[added]; times += candidateFrames[added] }
-            if i < primary.tokenIDs.count { ids.append(primary.tokenIDs[i]); times.append(primary.emissionFrames[i]) }
+            if let added = insertions[i] { for j in added { track.append(candidate, at: j) } }
+            if i < primary.tokenIDs.count { track.append(primary, at: i) }
         }
-        return (ids, times)
+        return track.result(text: "")
     }
 
     private func recoverPartialBlanks(_ primary: Result, samples: [Float], checkCancellation: () throws -> Void) throws -> Result {
@@ -446,21 +513,22 @@ public final class ParakeetTdtV3 {
         let originalSize = requestWindowSamples
         requestWindowSamples = 240000
         defer { requestWindowSamples = originalSize }
-        var start = 0, candidateIDs: [Int] = [], candidateFrames: [Int] = []
+        var start = 0, candidates = TokenTrack()
         var pending: PendingWindow?
         while start < samples.count {
             try checkCancellation()
             let buffer = Array(samples[start..<min(start + 240001, samples.count)])
             let plan = Self.planWindow(buffer, windowSamples: 240000)
             let candidate = try autoreleasepool { try decode(Array(buffer.prefix(plan.count)), checkCancellation: checkCancellation) }
-            Self.consume(candidate, start: start, seam: start + plan.right, pending: &pending, ids: &candidateIDs, frames: &candidateFrames)
+            Self.consume(candidate, start: start, seam: start + plan.right, pending: &pending, track: &candidates)
             if buffer.count <= 240000 { break }
             start += plan.advance
         }
-        if let last = pending { Self.flush(last, through: last.result.tokenIDs.count, ids: &candidateIDs, frames: &candidateFrames) }
-        let candidate = Result(text: "", tokenIDs: candidateIDs, emissionFrames: candidateFrames)
+        if let last = pending { Self.flush(last, through: last.result.tokenIDs.count, track: &candidates) }
+        let candidate = candidates.result(text: "")
         guard let recovered = Self.insertRecoveredTokens(primary, candidate: candidate, gaps: gaps) else { return primary }
-        return Result(text: text(recovered.ids), tokenIDs: recovered.ids, emissionFrames: recovered.frames)
+        return Result(text: text(recovered.tokenIDs), tokenIDs: recovered.tokenIDs, emissionFrames: recovered.emissionFrames,
+                      durations: recovered.durations, confidences: recovered.confidences)
     }
 
     private func preprocess(_ samples: [Float], models: WindowModels) throws -> MLFeatureProvider {
@@ -509,15 +577,11 @@ public final class ParakeetTdtV3 {
         }
     }
 
-    private func decode(_ samples: [Float], checkCancellation: () throws -> Void) throws -> Result {
-        try checkCancellation()
-        guard samples.count <= requestWindowSamples, samples.allSatisfy(\.isFinite) else { throw ParakeetError.invalidAudio("Invalid v3 window") }
-        diagnostics?("pcm", samples)
-        // Fewer than one source mel hop has no valid encoder frames.
-        if samples.count < 160 { return Result(text: "", tokenIDs: [], emissionFrames: []) }
+    /// Frontend and encoder for one window: the encoder output snapshot and its valid frame count.
+    private func encode(_ samples: [Float], checkCancellation: () throws -> Void) throws -> (features: MLMultiArray, frames: Int) {
         let models = try windowModels()
         let audio = models.audio, audioLength = models.audioLength
-        Self.zero(audio); Self.zero(hidden); Self.zero(cell)
+        Self.zero(audio)
         samples.withUnsafeBufferPointer { p in audio.dataPointer.assumingMemoryBound(to: Float.self).update(from: p.baseAddress!, count: samples.count) }
         audioLength[0] = NSNumber(value: samples.count)
         let frames = try autoreleasepool { () throws -> Int in
@@ -554,10 +618,20 @@ public final class ParakeetTdtV3 {
             try withExtendedLifetime((input, firstEncoded, tailInput, encoded, models.encoder, models.encoderTail)) { try Self.copy(features, into: models.featuresSnapshot) }
             return frames
         }
-        let features = models.featuresSnapshot
+        return (models.featuresSnapshot, frames)
+    }
+
+    private func decode(_ samples: [Float], checkCancellation: () throws -> Void) throws -> Result {
+        try checkCancellation()
+        guard samples.count <= requestWindowSamples, samples.allSatisfy(\.isFinite) else { throw ParakeetError.invalidAudio("Invalid v3 window") }
+        diagnostics?("pcm", samples)
+        // Fewer than one source mel hop has no valid encoder frames.
+        if samples.count < 160 { return Result(text: "", tokenIDs: [], emissionFrames: []) }
+        Self.zero(hidden); Self.zero(cell)
+        let (features, frames) = try encode(samples, checkCancellation: checkCancellation)
         diagnose("encoder", features)
         var time = 0, symbols = 0, lastToken = 8192, needsPrediction = true
-        var ids: [Int] = [], times: [Int] = []
+        var ids: [Int] = [], times: [Int] = [], spans: [Int] = [], confidences: [Float] = []
         while time < frames {
             try checkCancellation()
             if needsPrediction {
@@ -584,18 +658,23 @@ public final class ParakeetTdtV3 {
             let strides = features.strides.map(\.intValue)
             for channel in 0..<1024 { dst[channel] = src[channel * strides[1] + time * strides[2]] }
             diagnose("encoder_step", encoderStep)
-            let (token, duration) = try autoreleasepool {
+            let (token, duration, confidence) = try autoreleasepool {
                 let input = try Self.provider(["encoder_step": encoderStep, "decoder_step": decoderStep])
                 let output = try joint.prediction(from: input)
                 return try withExtendedLifetime((input, output)) {
                     let logits = try Self.output(output, "logits", [1,1,1,8198])
                     diagnose("logits", logits)
-                    return (try Self.argmax(logits, 0..<8193), try Self.argmax(logits, 8193..<8198) - 8193)
+                    let token = try Self.argmax(logits, 0..<8193)
+                    let duration = config.durations[try Self.argmax(logits, 8193..<8198) - 8193]
+                    // Only emitted tokens need a confidence; blanks skip the softmax.
+                    var confidence: Float = 0
+                    if token != 8192 { confidence = try Self.maxProbConfidence(logits, token: token, count: 8193) }
+                    return (token, duration, confidence)
                 }
             }
             diagnostics?("decision", [Float(time), Float(token), Float(duration)])
             if token != 8192 {
-                ids.append(token); times.append(time); lastToken = token
+                ids.append(token); times.append(time); spans.append(duration); confidences.append(confidence); lastToken = token
                 try Self.copy(candidateHidden, into: hidden); try Self.copy(candidateCell, into: cell)
                 needsPrediction = true
             }
@@ -605,7 +684,219 @@ public final class ParakeetTdtV3 {
                 symbols = 0
             }
         }
-        return Result(text: text(ids), tokenIDs: ids, emissionFrames: times)
+        return Result(text: text(ids), tokenIDs: ids, emissionFrames: times, durations: spans, confidences: confidences)
+    }
+
+    // MARK: - Warm-up
+
+    /// Loads and runs every encoder window function once (15 s, then 30 s), so the Neural Engine
+    /// compiles them now rather than during a user's first short or first long recording.
+    /// Leaves the 15 s window resident. Safe to call again; later calls hit the compile cache.
+    public func warmUp() throws {
+        let sizes = config.windows?.map(\.samples) ?? [240000]
+        for size in sizes.reversed() {
+            requestWindowSamples = size
+            _ = try autoreleasepool { try decode([Float](repeating: 0, count: min(size, 320000)), checkCancellation: {}) }
+        }
+        requestWindowSamples = 240000
+    }
+
+    // MARK: - Ranked alternatives
+
+    /// One beam-search hypothesis, best first in `alternatives`.
+    public struct Hypothesis: Sendable, Equatable {
+        public let text: String
+        public let tokenIDs: [Int]
+        /// Total log probability (tokens and durations).
+        public let score: Float
+        /// `score / (tokens + 1)`, the ranking score when normalization is on.
+        public let normalizedScore: Float
+    }
+
+    private struct PredictorState {
+        let hidden: MLMultiArray, cell: MLMultiArray
+    }
+
+    private struct BeamState {
+        var tokens: [Int] = []
+        var score: Float = 0
+        var state: PredictorState
+        var next: PredictorState?
+        var output: MLMultiArray?
+        var lastFrame = 0
+        var lastToken = 8192
+        var predictionValid = false
+    }
+
+    /// Ranked TDT beam search over one window of at most 30 s, as parakeet.cpp's `tdt_beam_search`
+    /// (NeMo's default TDT beam): the same expansions, duplicate merging, pruning and length
+    /// normalization. Used for vocabulary-aware choices among close candidates, not plain transcription.
+    public func alternatives(_ samples: [Float], beamSize: Int = 4, nbest: Int = 4, normalizeScores: Bool = true,
+                             checkCancellation: () throws -> Void = {}) throws -> [Hypothesis] {
+        guard (1...16).contains(beamSize), (1...beamSize).contains(nbest) else {
+            throw ParakeetError.badConfig("Require 16 >= beam size >= n-best >= 1")
+        }
+        guard samples.allSatisfy(\.isFinite) else { throw ParakeetError.invalidAudio("PCM samples must be finite") }
+        requestWindowSamples = windowSize(for: samples.count)
+        guard samples.count <= requestWindowSamples else {
+            throw ParakeetError.invalidAudio("Alternatives need audio that fits one window (30 s or less)")
+        }
+        if samples.count < 160 { return [Hypothesis(text: "", tokenIDs: [], score: 0, normalizedScore: 0)] }
+        let (features, frames) = try encode(samples, checkCancellation: checkCancellation)
+        return try beamSearch(features: features, frames: frames, beam: min(beamSize, 8192), nbest: nbest,
+                              normalize: normalizeScores, checkCancellation: checkCancellation)
+    }
+
+    private func predict(_ label: Int, from state: PredictorState) throws -> (output: MLMultiArray, next: PredictorState) {
+        try autoreleasepool {
+            targets[0] = NSNumber(value: label)
+            let input = try Self.provider(["targets": targets, "h_in": state.hidden, "c_in": state.cell])
+            let predicted = try predictor.prediction(from: input)
+            return try withExtendedLifetime((input, predicted)) {
+                let output = try Self.array([1, 640, 1]), hidden = try Self.array([2, 1, 640]), cell = try Self.array([2, 1, 640])
+                try Self.copy(Self.output(predicted, "decoder", [1,640,1]), into: output)
+                try Self.copy(Self.output(predicted, "h_out", [2,1,640]), into: hidden)
+                try Self.copy(Self.output(predicted, "c_out", [2,1,640]), into: cell)
+                return (output, PredictorState(hidden: hidden, cell: cell))
+            }
+        }
+    }
+
+    private func jointLogits(_ decoderOutput: MLMultiArray) throws -> [Float] {
+        try autoreleasepool {
+            let input = try Self.provider(["encoder_step": encoderStep, "decoder_step": decoderOutput])
+            let output = try joint.prediction(from: input)
+            return try withExtendedLifetime((input, output)) {
+                let logits = try Self.output(output, "logits", [1,1,1,8198])
+                guard logits.dataType == .float32 else { throw ParakeetError.badConfig("Expected float32 joint logits") }
+                return logits.withUnsafeBufferPointer(ofType: Float.self) { buffer in
+                    let stride = logits.strides[3].intValue
+                    return (0..<8198).map { buffer[$0 * stride] }
+                }
+            }
+        }
+    }
+
+    static func logSoftmax(_ values: ArraySlice<Float>) -> [Float] {
+        let maximum = values.max() ?? 0
+        var sum = 0.0
+        for value in values { sum += exp(Double(value) - Double(maximum)) }
+        let denominator = log(sum)
+        return values.map { Float(Double($0) - Double(maximum) - denominator) }
+    }
+
+    /// Indices of the `k` best scores, ties to the lower index.
+    static func topK(_ scores: [Float], count n: Int, _ k: Int) -> [(score: Float, index: Int)] {
+        let ranked = (0..<n).map { (score: scores[$0], index: $0) }
+            .sorted { $0.score != $1.score ? $0.score > $1.score : $0.index < $1.index }
+        return Array(ranked.prefix(min(n, k)))
+    }
+
+    static func logAddExp(_ a: Float, _ b: Float) -> Float {
+        let high = max(a, b), low = min(a, b)
+        return high + log1p(exp(low - high))
+    }
+
+    private static func mergeDuplicates(_ hypotheses: inout [BeamState]) {
+        hypotheses.sort { $0.score > $1.score }
+        var merged: [BeamState] = []
+        for candidate in hypotheses {
+            if let index = merged.firstIndex(where: { $0.lastFrame == candidate.lastFrame && $0.tokens == candidate.tokens }) {
+                merged[index].score = logAddExp(merged[index].score, candidate.score)
+            } else {
+                merged.append(candidate)
+            }
+        }
+        hypotheses = merged
+    }
+
+    private func beamSearch(features: MLMultiArray, frames: Int, beam: Int, nbest: Int, normalize: Bool,
+                            checkCancellation: () throws -> Void) throws -> [Hypothesis] {
+        let blank = 8192, durations = config.durations
+        let tokenBeam = min(beam, blank - 1), durationBeam = min(beam, durations.count)
+        let zeroDuration = durations.firstIndex(of: 0)
+        guard features.dataType == .float32 else { throw ParakeetError.badConfig("Expected float32 encoder output") }
+        let zeroState = PredictorState(hidden: try Self.array([2, 1, 640]), cell: try Self.array([2, 1, 640]))
+        Self.zero(zeroState.hidden); Self.zero(zeroState.cell)
+        var kept = [BeamState(state: zeroState)]
+        let source = features.dataPointer.assumingMemoryBound(to: Float.self), strides = features.strides.map(\.intValue)
+        let step = encoderStep.dataPointer.assumingMemoryBound(to: Float.self)
+
+        for time in 0..<frames {
+            try checkCancellation()
+            for channel in 0..<1024 { step[channel] = source[channel * strides[1] + time * strides[2]] }
+            var current = kept.filter { $0.lastFrame == time }
+            kept = kept.filter { $0.lastFrame > time }
+
+            while !current.isEmpty {
+                let bestIndex = current.indices.max { current[$0].score < current[$1].score }!
+                var best = current.remove(at: bestIndex)
+                if !best.predictionValid {
+                    let predicted = try predict(best.lastToken, from: best.state)
+                    best.output = predicted.output; best.next = predicted.next; best.predictionValid = true
+                }
+                let logits = try jointLogits(best.output!)
+                let tokenLogp = Self.logSoftmax(logits[0..<8193])
+                let durationLogp = Self.logSoftmax(logits[8193..<8198])
+                guard tokenLogp.allSatisfy(\.isFinite), durationLogp.allSatisfy(\.isFinite) else {
+                    throw ParakeetError.badConfig("Nonfinite beam log probability")
+                }
+                let bestDurations = Self.topK(durationLogp, count: durations.count, durationBeam)
+                let bestTokens = Self.topK(tokenLogp, count: blank, tokenBeam)
+                var pairs: [(score: Float, token: Int, duration: Int)] = []
+                for d in bestDurations { for t in bestTokens { pairs.append((d.score + t.score, t.index, d.index)) } }
+                pairs.sort {
+                    if $0.score != $1.score { return $0.score > $1.score }
+                    if $0.duration != $1.duration { return $0.duration < $1.duration }
+                    return $0.token < $1.token
+                }
+                for pair in pairs.prefix(tokenBeam) {
+                    let duration = durations[pair.duration]
+                    var child = best
+                    child.score += pair.score
+                    // A zero-duration step that costs nothing (log p rounds to 0 in float32) could
+                    // expand forever. parakeet.cpp aborts the whole search there; skip just that step.
+                    if duration == 0 && !(child.score < best.score) { continue }
+                    child.tokens.append(pair.token)
+                    child.state = best.next!
+                    child.next = nil; child.output = nil
+                    child.lastToken = pair.token
+                    child.predictionValid = false
+                    child.lastFrame += duration
+                    if duration == 0 { current.append(child) } else { kept.append(child) }
+                }
+                for ranked in bestDurations {
+                    var index = ranked.index
+                    if index == zeroDuration {
+                        guard bestDurations.count == 1 else { continue }
+                        index = durations.indices.filter { durations[$0] > 0 }.max { durationLogp[$0] < durationLogp[$1] }!
+                    }
+                    var child = best
+                    child.score += tokenLogp[blank] + durationLogp[index]
+                    child.lastFrame += durations[index]
+                    kept.append(child)
+                }
+
+                Self.mergeDuplicates(&kept)
+                if let nextScore = current.map(\.score).max() {
+                    let moreProbable = kept.filter { $0.score > nextScore }
+                    if moreProbable.count >= beam {
+                        kept = moreProbable
+                        break
+                    }
+                } else {
+                    kept.sort { $0.score > $1.score }
+                    if kept.count > beam { kept.removeLast(kept.count - beam) }
+                }
+            }
+        }
+
+        func rank(_ h: BeamState) -> Float { normalize ? h.score / Float(h.tokens.count + 1) : h.score }
+        kept.sort { rank($0) > rank($1) }
+        return kept.prefix(nbest).map {
+            Hypothesis(text: text($0.tokens), tokenIDs: $0.tokens, score: $0.score,
+                       normalizedScore: $0.score / Float($0.tokens.count + 1))
+        }
     }
 
     private func diagnose(_ name: String, _ array: MLMultiArray) {
@@ -624,6 +915,14 @@ public final class ParakeetTdtV3 {
         }
         diagnostics(name, values)
     }
+
+    /// Word timestamps and confidences for a result from this model.
+    public func words(_ result: Result) -> [ParakeetWord] {
+        ParakeetWords.group(result, pieces: pieces, punctuation: wordPunctuation)
+    }
+
+    /// The tokenizer piece for an id, or "" when out of range.
+    public func piece(_ id: Int) -> String { pieces.indices.contains(id) ? pieces[id] : "" }
 
     private func text(_ ids: [Int]) -> String { Self.detokenize(ids, pieces: pieces, punctuation: config.punctuation) }
     static func detokenize(_ ids: [Int], pieces: [String], punctuation supported: [String]) -> String {
@@ -726,6 +1025,24 @@ public final class ParakeetTdtV3 {
                 if value > maximum { maximum = value; best = index }
             }
             return best
+        }
+    }
+
+    /// NeMo `max_prob` confidence (α = 1) of `token` over the first `count` logits (tokens and blank,
+    /// not durations): (N·p − 1)/(N − 1). Same arithmetic as parakeet.cpp's `decode_max_prob_conf`.
+    static func maxProbConfidence(_ a: MLMultiArray, token: Int, count: Int) throws -> Float {
+        guard a.dataType == .float32, count > 1, token >= 0, token < count, count <= a.count else {
+            throw ParakeetError.badConfig("Expected float32 joint logits")
+        }
+        return a.withUnsafeBufferPointer(ofType: Float.self) { buffer in
+            let pointer = buffer.baseAddress!, stride = a.strides[3].intValue
+            var maximum = -Float.infinity
+            for index in 0..<count { maximum = max(maximum, pointer[index * stride]) }
+            var denominator = 0.0
+            for index in 0..<count { denominator += exp(Double(pointer[index * stride] - maximum)) }
+            let p = exp(Double(pointer[token * stride] - maximum)) / denominator
+            let n = Double(count)
+            return Float((n * p - 1) / (n - 1))
         }
     }
 

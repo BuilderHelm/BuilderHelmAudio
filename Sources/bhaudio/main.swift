@@ -6,7 +6,7 @@ usage: bhaudio <command> [options]
 
   models                                   List models and whether they are downloaded
   download <model>                         Download and verify a model
-  transcribe <audio> [--model M] [--ctc] [--compute ane|gpu|cpu] [--json]
+  transcribe <audio>... [--model M] [--ctc] [--compute ane|gpu|cpu] [--json]  (--json: one line per file; --alternatives adds a 4-best beam ≤ 30 s)
   spot <audio> <keyword>... [--model M] [--threshold T]
   benchmark <cases.json> [--model M] [--ctc] [--compute ane|gpu|cpu] [--rounds N] [--out results.json]
 
@@ -71,8 +71,9 @@ func load(_ model: AsrModel, ctc: Bool, compute: ComputeUnits = .neuralEngine) a
     return recognizer
 }
 
-func json(_ value: Any) -> String {
-    String(decoding: try! JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .prettyPrinted]), as: UTF8.self)
+func json(_ value: Any, pretty: Bool = true) -> String {
+    String(decoding: try! JSONSerialization.data(withJSONObject: value, options: pretty ? [.sortedKeys, .prettyPrinted] : [.sortedKeys]),
+           as: UTF8.self)
 }
 
 /// Word error rate after lowercasing and removing punctuation. Simpler than Whisper's English normalizer.
@@ -111,17 +112,26 @@ do {
         print(directory.path)
     case "transcribe":
         let model = model(), ctc = flag("--ctc"), asJSON = flag("--json"), compute = computeUnits()
-        guard let path = arguments.first else { fail(usage) }
+        let withAlternatives = flag("--alternatives")
+        guard !arguments.isEmpty else { fail(usage) }
         let recognizer = try await load(model, ctc: ctc, compute: compute)
-        let transcript = try await recognizer.transcribe(file: URL(fileURLWithPath: path))
-        if asJSON {
-            print(json(["text": transcript.text, "ctc_text": transcript.ctcText, "duration": transcript.duration,
-                        "processing_time": transcript.processingTime,
-                        "tokens": transcript.tokens.map { ["text": $0.text, "time": $0.time] }]))
-        } else {
-            print(transcript.text)
-            FileHandle.standardError.write(Data(String(format: "%.1f s audio in %.3f s (%.0f× real time)\n",
-                transcript.duration, transcript.processingTime, transcript.realTimeFactor).utf8))
+        for path in arguments {
+            let transcript = try await recognizer.transcribe(file: URL(fileURLWithPath: path))
+            if asJSON {
+                print(json(["path": path, "text": transcript.text, "ctc_text": transcript.ctcText, "duration": transcript.duration,
+                            "processing_time": transcript.processingTime,
+                            "tokens": transcript.tokens.map { ["text": $0.text, "time": $0.time] },
+                            "words": transcript.words.map { ["text": $0.text, "start": $0.start, "end": $0.end,
+                                                             "confidence": Double($0.confidence)] },
+                            "alternatives": withAlternatives && transcript.duration <= 30
+                                ? try await recognizer.alternatives(samples: SpeechRecognizer.loadAudio(URL(fileURLWithPath: path))).map {
+                                    ["text": $0.text, "score": Double($0.score), "normalized_score": Double($0.normalizedScore)] }
+                                : []], pretty: false))
+            } else {
+                print(transcript.text)
+                FileHandle.standardError.write(Data(String(format: "%.1f s audio in %.3f s (%.0f× real time)\n",
+                    transcript.duration, transcript.processingTime, transcript.realTimeFactor).utf8))
+            }
         }
     case "spot":
         let model = model()

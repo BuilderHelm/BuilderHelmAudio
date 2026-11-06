@@ -64,7 +64,7 @@ print(transcript.text)
 - **Multilingual** — Parakeet V3 recognizes 25 European languages with original FP16 weights.
 - **English accuracy** — 2.46% WER on LibriSpeech test-clean (110M TDT).
 - **Simple** — one call to download and load, one call to transcribe.
-- **Token times** — the 110M TDT + CTC model returns token times and a CTC transcript from the same pass.
+- **Token and word times** — the 110M TDT + CTC model returns token times and a CTC transcript from the same pass; V3 returns token times and words with start, end and confidence.
 - **Keyword spotting** — find names and terms in audio, with start and end times. No tokenizer needed.
 - **Verified downloads** — every file is pinned to a Hugging Face commit and checked by SHA-256. Interrupted downloads resume file by file.
 - **Any audio** — any format AVFoundation reads, or raw samples; converted to 16 kHz mono.
@@ -97,7 +97,7 @@ https://github.com/BuilderHelm/BuilderHelmAudio
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/BuilderHelm/BuilderHelmAudio", from: "0.2.0"),
+    .package(url: "https://github.com/BuilderHelm/BuilderHelmAudio", from: "0.3.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: ["BuilderHelmAudio"]),
@@ -141,7 +141,9 @@ print(transcript.text)
 
 V3 automatically recognizes Bulgarian, Croatian, Czech, Danish, Dutch, English, Estonian, Finnish, French, German, Greek, Hungarian, Italian, Latvian, Lithuanian, Maltese, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish and Ukrainian.
 
-Offline recordings have no fixed duration limit. Short requests use a 15-second function; longer requests use a shared-weight 30-second function, with quiet-pause cuts and overlap token matching. Reuse one recognizer: the first request at a different window size may incur preparation cost. V3 returns text, with `ctcTranscript == nil` and empty `tokens`. CTC probabilities, keyword spotting, aligned timestamps and live partial results are unavailable. See [V3 validation and limitations](Documentation/ParakeetV3.md).
+Offline recordings have no fixed duration limit. Short requests use a 15-second function; longer requests use a shared-weight 30-second function, with quiet-pause cuts and overlap token matching. Reuse one recognizer: the first request at a different window size may incur preparation cost. V3 returns text, token times and `words` (start, end and confidence, NeMo-compatible), with `ctcTranscript == nil`. `alternatives(samples:beamSize:nbest:)` returns ranked beam-search candidates for recordings of at most 30 s. CTC probabilities, keyword spotting, segment timestamps and live partial results are unavailable.
+
+The Neural Engine compiles each V3 window the first time an app loads it on a macOS build, which takes about 20 s. Call `prepare()` once after loading (for example during setup) so the first recording does not wait for it. Later loads take about 0.1 s: files verified once are not re-hashed until they change. See [V3 validation and limitations](Documentation/ParakeetV3.md).
 
 ### Transcribe samples
 
@@ -233,6 +235,8 @@ Synchronous CoreML work already running may finish before cancellation is observ
 | `spot(_:inFile:threshold:)` | Find keywords in an audio file |
 | `keywordSpotter.detect(_:in:threshold:)` | Find keywords in saved CTC probabilities |
 | `capabilities`, `keywordSpotterIfAvailable` | Check which outputs/operations the selected runtime supports |
+| `prepare()` | Compile and run every model function once, so the first request doesn't pay for it |
+| `alternatives(samples:beamSize:nbest:)` | Ranked beam-search candidates (V3, at most 30 s) |
 | `SpeechRecognizer.loadAudio(_:)` | Read any supported file as 16 kHz mono samples |
 | `ModelStore.shared` | `download`, `isDownloaded`, `verify`, `remove`, `directory(for:)` |
 | `AsrModel.all`, `AsrModel.named(_:)` | List models, or look one up by id |
@@ -243,6 +247,7 @@ Synchronous CoreML work already running may finish before cancellation is observ
 | `ctcText` | CTC transcript, kept as a String for compatibility |
 | `ctcTranscript` | Optional CTC output; nil means the runtime has no CTC output |
 | `tokens` | `[TimedToken]` when the selected model supports token timestamps; otherwise empty |
+| `words` | `[TimedWord]` (text, start, end, confidence) when the model supports word timestamps; otherwise empty |
 | `duration`, `processingTime`, `realTimeFactor` | Audio length, processing time and speed |
 | `ctcLogProbabilities` | Per-frame CTC probabilities, when requested |
 
@@ -390,9 +395,9 @@ BuilderHelmAudio/
 
 ## Status
 
-Version 0.2.0 adds the multilingual V3 FP16 model, long-recording joins, runtime selection, cancellation and capability-aware APIs. Physical validation uses an Apple M5 Mac (macOS 27.2) and iPhone 13 (iOS 27.2). The compatibility target is all Apple Silicon Macs, M1 onward, with macOS 15+, and iOS 18+. See [V3 validation](Documentation/ParakeetV3.md) for accuracy, quantization decisions, sustained testing and coverage limits.
+Version 0.3.0 adds V3 token and word timestamps with confidences, ranked alternatives, `prepare()` and faster repeat loads. Version 0.2.0 added the multilingual V3 FP16 model, long-recording joins, runtime selection, cancellation and capability-aware APIs. Physical validation uses an Apple M5 Mac (macOS 27.2) and iPhone 13 (iOS 27.2). The compatibility target is all Apple Silicon Macs, M1 onward, with macOS 15+, and iOS 18+. See [V3 validation](Documentation/ParakeetV3.md) for accuracy, quantization decisions, sustained testing and coverage limits.
 
-Voice activity detection, live partial transcription, aligned V3 word/segment timestamps, subtitles, diarization, speech synthesis, noise suppression and echo cancellation are separate future work.
+Voice activity detection, live partial transcription, V3 segment timestamps, subtitles, diarization, speech synthesis, noise suppression and echo cancellation are separate future work.
 
 [File an issue](https://github.com/BuilderHelm/BuilderHelmAudio/issues/new) if something breaks.
 

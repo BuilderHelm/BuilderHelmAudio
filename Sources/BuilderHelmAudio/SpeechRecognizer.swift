@@ -11,6 +11,25 @@ public struct TimedToken: Sendable, Equatable {
     public let time: Double
 }
 
+/// A word of the TDT transcript, when it was spoken and how sure the model was.
+public struct TimedWord: Sendable, Equatable {
+    /// Word text, with any punctuation that follows it.
+    public let text: String
+    /// Start and end in seconds from the start of the audio (80 ms resolution).
+    public let start: Double
+    public let end: Double
+    /// Lowest token confidence in the word (NeMo `max_prob`, `min` aggregate), 0...1.
+    public let confidence: Float
+}
+
+/// One ranked beam-search candidate for the same audio.
+public struct TranscriptAlternative: Sendable, Equatable {
+    public let text: String
+    /// Total log probability, and the same divided by (tokens + 1); higher is better.
+    public let score: Float
+    public let normalizedScore: Float
+}
+
 public struct Transcript: Sendable {
     /// TDT transcript, or the CTC transcript for CTC-only models and `.ctc` mode.
     public let text: String
@@ -20,6 +39,8 @@ public struct Transcript: Sendable {
     public var ctcText: String { ctcTranscript ?? "" }
     /// TDT tokens with times when tokenTimestamps is supported; otherwise empty.
     public let tokens: [TimedToken]
+    /// Words with start, end and confidence when wordTimestamps is supported; otherwise empty.
+    public var words: [TimedWord] = []
     /// Audio length in seconds.
     public let duration: Double
     /// Transcription time in seconds, excluding model loading.
@@ -159,15 +180,36 @@ public final class SpeechRecognizer: @unchecked Sendable {
         return spotter.detect(keywords, in: probabilities, threshold: threshold)
     }
 
+    /// Compiles and runs every model function once (for v3, both the 15 s and 30 s encoders), so the
+    /// first real recording doesn't wait for the Neural Engine compiler. The first call on a device can
+    /// take several seconds; later calls hit the system's compile cache. Returns the seconds it took.
+    @discardableResult
+    public func prepare() async throws -> Double {
+        try await runOnQueue(queue) { _ in
+            let start = DispatchTime.now().uptimeNanoseconds
+            try self.runtime.warmUp()
+            return Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
+        }
+    }
+
+    /// Ranked TDT beam-search candidates for one recording of at most 30 s, best first by
+    /// normalized score. Requires `.rankedAlternatives`.
+    public func alternatives(samples: [Float], beamSize: Int = 4, nbest: Int = 4) async throws -> [TranscriptAlternative] {
+        guard capabilities.contains(.rankedAlternatives) else { throw BuilderHelmAudioError.unsupportedOperation("ranked alternatives") }
+        return try await runOnQueue(queue) { cancellation in
+            try self.runtime.alternatives(samples: samples, beamSize: beamSize, nbest: nbest, request: RuntimeRequest(
+                includeCtcLogProbabilities: false, cancellation: cancellation))
+        }
+    }
+
     /// Reads any AVFoundation-supported audio file as 16 kHz mono samples.
     public static func loadAudio(_ file: URL) throws -> [Float] {
         do { return try ParakeetAudio.read(file) } catch { throw BuilderHelmAudioError.unsupportedAudio(String(describing: error)) }
     }
 
     private func transcript(_ result: RuntimeResult, duration: Double, elapsed: Double) -> Transcript {
-        Transcript(text: result.text, ctcTranscript: result.ctcText, tokens: result.tokens, duration: duration,
-                          processingTime: elapsed,
-                          ctcLogProbabilities: result.ctcLogProbabilities)
+        Transcript(text: result.text, ctcTranscript: result.ctcText, tokens: result.tokens, words: result.words,
+                   duration: duration, processingTime: elapsed, ctcLogProbabilities: result.ctcLogProbabilities)
     }
 
     private func validateRequest(includeCtcLogProbabilities: Bool) throws {

@@ -92,7 +92,7 @@ extension RealModelTests {
         _ = try await store.download(descriptor)
         #expect(try await store.verify(descriptor))
         let recognizer = try await SpeechRecognizer.load(descriptor, computeUnits: realModelTestComputeUnits)
-        #expect(recognizer.capabilities == [.tdt])
+        #expect(recognizer.capabilities == [.tdt, .tokenTimestamps, .wordTimestamps, .rankedAlternatives])
         #expect(recognizer.keywordSpotterIfAvailable == nil)
         var shortText: String?
         for name in ["speech", "long", "speech"] {
@@ -103,7 +103,13 @@ extension RealModelTests {
             #expect(file.text == pcm.text)
             #expect(file.ctcTranscript == nil)
             #expect(file.ctcLogProbabilities == nil)
-            #expect(file.tokens.isEmpty)
+            #expect(file.tokens.count >= file.words.count)
+            #expect(file.words == pcm.words)
+            // Words rebuild the transcript, in order, inside the audio, with valid confidences.
+            #expect(file.words.map(\.text).joined(separator: " ") == file.text)
+            #expect(zip(file.words, file.words.dropFirst()).allSatisfy { $0.start <= $1.start && $0.end <= $1.end + 1e-9 })
+            #expect(file.words.allSatisfy { $0.start <= $0.end && $0.end <= file.duration + 0.4 })
+            #expect(file.words.allSatisfy { (0...1).contains($0.confidence) })
             #expect(abs(file.duration - pcm.duration) < 0.001)
             if name == "speech" {
                 #expect(file.text.lowercased().contains("quick brown fox jumps over the lazy dog"))
@@ -111,9 +117,22 @@ extension RealModelTests {
                 shortText = file.text
             } else {
                 #expect(file.duration > 60)
+                #expect((file.words.last?.end ?? 0) > file.duration - 10)
                 #expect(file.text.split(separator: " ").count > 50)
             }
         }
+        // Warm-up compiles both windows; a second call is a cache hit.
+        let warm = try await recognizer.prepare()
+        #expect(warm < 30)
+        let speechSamples = try SpeechRecognizer.loadAudio(Bundle.module.url(forResource: "speech", withExtension: "wav", subdirectory: "Fixtures")!)
+        let alternatives = try await recognizer.alternatives(samples: speechSamples)
+        #expect((1...4).contains(alternatives.count))
+        #expect(alternatives.first?.text == shortText)
+        #expect(zip(alternatives, alternatives.dropFirst()).allSatisfy { $0.normalizedScore >= $1.normalizedScore })
+        // Distinct token paths can spell the same text, as in parakeet.cpp's beam.
+        #expect(alternatives.allSatisfy { $0.score.isFinite && $0.normalizedScore <= 0 })
+        let long = try SpeechRecognizer.loadAudio(Bundle.module.url(forResource: "long", withExtension: "wav", subdirectory: "Fixtures")!)
+        await #expect(throws: (any Error).self) { try await recognizer.alternatives(samples: long) }
         let silence = try await recognizer.transcribe(samples: [Float](repeating: 0, count: 31 * 16000))
         #expect(silence.text.isEmpty)
         let speech = Bundle.module.url(forResource: "speech", withExtension: "wav", subdirectory: "Fixtures")!

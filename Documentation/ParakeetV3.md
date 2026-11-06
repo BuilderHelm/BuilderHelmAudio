@@ -8,7 +8,7 @@ let transcript = try await recognizer.transcribe(file: recordingURL)
 print(transcript.text)
 ```
 
-The descriptor advertises the checkpoint's 25 languages and TDT text only. `ctcTranscript` is nil, `tokens` is empty, and CTC probability/keyword requests throw `unsupportedOperation`. The SDK does not expose aligned V3 word/segment timestamps, live partial results, subtitles or speaker labels.
+The descriptor advertises the checkpoint's 25 languages, TDT text, token and word timestamps, and ranked alternatives. Token times use NeMo's TDT emission frames (80 ms); words carry start, end and the lowest token `max_prob` confidence. `ctcTranscript` is nil, and CTC probability/keyword requests throw `unsupportedOperation`. The SDK does not expose V3 segment timestamps, live partial results, subtitles or speaker labels.
 
 ## Runtime and long recordings
 

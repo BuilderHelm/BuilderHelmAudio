@@ -41,6 +41,7 @@ struct RuntimeResult: Sendable {
     let ctcText: String?
     let tokens: [TimedToken]
     let ctcLogProbabilities: CtcLogProbabilities?
+    var words: [TimedWord] = []
 }
 
 /// Implementations are owned by a recognizer and used only on its serial queue.
@@ -51,6 +52,17 @@ protocol AsrRuntime: AnyObject {
     var keywordSpotter: KeywordSpotter? { get }
     func transcribe(file: URL, request: RuntimeRequest) throws -> RuntimeResult
     func transcribe(samples: [Float], request: RuntimeRequest) throws -> RuntimeResult
+    /// Compiles and runs every model function once so the first real request doesn't pay for it.
+    func warmUp() throws
+    func alternatives(samples: [Float], beamSize: Int, nbest: Int, request: RuntimeRequest) throws -> [TranscriptAlternative]
+}
+
+extension AsrRuntime {
+    func warmUp() throws { _ = try transcribe(samples: [Float](repeating: 0, count: 16000), request: RuntimeRequest(
+        includeCtcLogProbabilities: false, cancellation: CancellationSignal())) }
+    func alternatives(samples: [Float], beamSize: Int, nbest: Int, request: RuntimeRequest) throws -> [TranscriptAlternative] {
+        throw BuilderHelmAudioError.unsupportedOperation("ranked alternatives")
+    }
 }
 
 struct RuntimeSelection: Sendable {
@@ -64,11 +76,11 @@ struct RuntimeSelection: Sendable {
         let metadata = model ?? .parakeetTdtCtc110M
         let architecture = metadata.architecture
         if architecture == .parakeetV3 {
-            guard mode == .tdt, metadata.capabilities == [.tdt], metadata.ctcConfiguration == nil,
+            guard mode == .tdt, metadata.capabilities == .parakeetV3Tdt, metadata.ctcConfiguration == nil,
                   Set(metadata.supportedLanguages) == Set(AsrModel.experimentalParakeetV3.supportedLanguages) else {
-                throw BuilderHelmAudioError.invalidModelConfiguration("V3 supports TDT text only; CTC and timestamps are unavailable")
+                throw BuilderHelmAudioError.invalidModelConfiguration("V3 supports TDT text with token and word timestamps; CTC is unavailable")
             }
-            return Self(architecture: .parakeetV3, mode: .tdt, capabilities: [.tdt], ctcConfiguration: nil)
+            return Self(architecture: .parakeetV3, mode: .tdt, capabilities: .parakeetV3Tdt, ctcConfiguration: nil)
         }
         guard architecture == .parakeet110M else {
             throw BuilderHelmAudioError.unsupportedArchitecture(architecture.rawValue)

@@ -24,7 +24,7 @@ import Testing
     let model = AsrModel.experimentalParakeetV3
     let selection = try RuntimeSelection.resolve(model: model, mode: .tdt)
     #expect(selection.architecture == .parakeetV3)
-    #expect(selection.capabilities == [.tdt])
+    #expect(selection.capabilities == [.tdt, .tokenTimestamps, .wordTimestamps, .rankedAlternatives])
     #expect(model.maxRequestDuration == nil)
     #expect(AsrModel.parakeetTdtCtc110M.maxRequestDuration == nil)
     #expect(selection.ctcConfiguration == nil)
@@ -163,8 +163,8 @@ import Testing
     let candidate = ParakeetTdtV3.Result(text: "", tokenIDs: Array(1...10), emissionFrames: [0,1,2,20,40,60,80,100,101,102])
     let gaps = [ParakeetTdtV3.BlankSpan(index: 3, left: 2, right: 100)]
     let recovered = try #require(ParakeetTdtV3.insertRecoveredTokens(primary, candidate: candidate, gaps: gaps))
-    #expect(recovered.ids == Array(1...10))
-    #expect(recovered.frames == candidate.emissionFrames)
+    #expect(recovered.tokenIDs == Array(1...10))
+    #expect(recovered.emissionFrames == candidate.emissionFrames)
     let missingAnchor = ParakeetTdtV3.Result(text: "", tokenIDs: [1,2,3,4,5,6,7,8,9,99], emissionFrames: candidate.emissionFrames)
     #expect(ParakeetTdtV3.insertRecoveredTokens(primary, candidate: missingAnchor, gaps: gaps) == nil)
 }
@@ -184,8 +184,8 @@ import Testing
     let gaps = [ParakeetTdtV3.BlankSpan(index: 0, left: -1, right: 100),
                 ParakeetTdtV3.BlankSpan(index: 3, left: 102, right: 300)]
     let recovered = try #require(ParakeetTdtV3.insertRecoveredTokens(primary, candidate: candidate, gaps: gaps))
-    #expect(recovered.ids == Array(1...9))
-    #expect(Array(recovered.frames[3..<6]) == primary.emissionFrames)
+    #expect(recovered.tokenIDs == Array(1...9))
+    #expect(Array(recovered.emissionFrames[3..<6]) == primary.emissionFrames)
 }
 
 @Test func v3BlankRecoveryRequiresChangingActiveAudio() {
@@ -228,4 +228,50 @@ import Testing
     #expect(try ParakeetTdtV3.argmax(logits, 0..<5) == 1)
     pointer[8] = .infinity
     #expect(throws: ParakeetError.self) { try ParakeetTdtV3.argmax(logits, 0..<5) }
+}
+
+@Test func v3VerificationIsRecordedAndRedoneWhenAFileChanges() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: root) }
+    let directory = root.appendingPathComponent("model"), cache = root.appendingPathComponent("cache")
+    try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+    let file = directory.appendingPathComponent("vocab.json")
+    try Data("abc".utf8).write(to: file)
+    let sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    try ParakeetTdtV3.verify(["vocab.json": sha], in: directory, cache: cache)
+    let records = try fm.contentsOfDirectory(atPath: cache.path).filter { $0.hasPrefix("verified-") }
+    #expect(records.count == 1)
+
+    // Same size, new bytes: the recorded identity no longer matches, so the file is hashed again.
+    try Data("abd".utf8).write(to: file)
+    #expect(throws: ParakeetError.self) { try ParakeetTdtV3.verify(["vocab.json": sha], in: directory, cache: cache) }
+    try Data("abc".utf8).write(to: file)
+    try ParakeetTdtV3.verify(["vocab.json": sha], in: directory, cache: cache)
+    // A different manifest is checked again even when the files are unchanged.
+    #expect(throws: ParakeetError.self) {
+        try ParakeetTdtV3.verify(["vocab.json": String(repeating: "0", count: 64)], in: directory, cache: cache)
+    }
+}
+
+@Test func v3CacheKeyComesFromTheManifestOnlyWhenItListsEveryPackageFile() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: root) }
+    let package = root.appendingPathComponent("Joint.mlpackage")
+    try fm.createDirectory(at: package.appendingPathComponent("Data"), withIntermediateDirectories: true)
+    try Data("m".utf8).write(to: package.appendingPathComponent("Manifest.json"))
+    try Data("w".utf8).write(to: package.appendingPathComponent("Data/weight.bin"))
+    let a = String(repeating: "a", count: 64), b = String(repeating: "b", count: 64)
+    let manifest = ["Joint.mlpackage/Manifest.json": a, "Joint.mlpackage/Data/weight.bin": b]
+    let key = try #require(try ParakeetTdtCtc110M.manifestHash(package, manifest))
+    #expect(key.count == 16)
+    // Computed outside #expect: Swift 6.0's macro rejects `try` inside a comparison.
+    let content = try ParakeetTdtCtc110M.contentHash(package)
+    let changed = try ParakeetTdtCtc110M.manifestHash(package, manifest.merging(["Joint.mlpackage/Manifest.json": b]) { $1 })
+    #expect(key != content)
+    #expect(changed != key)
+    try Data("x".utf8).write(to: package.appendingPathComponent("Data/extra.bin"))
+    let incomplete = try ParakeetTdtCtc110M.manifestHash(package, manifest)
+    #expect(incomplete == nil)
 }

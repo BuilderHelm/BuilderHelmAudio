@@ -163,7 +163,7 @@ do {
         let cases = try JSONDecoder().decode([Case].self, from: Data(contentsOf: URL(fileURLWithPath: path)))
         let recognizer = try await load(model, ctc: ctc, compute: compute)
         for item in cases { _ = try await recognizer.transcribe(file: URL(fileURLWithPath: item.path)) }   // warm every window size
-        var totals: [Double] = [], latencies: [Double] = [], texts: [String] = []
+        var totals: [Double] = [], latencies: [Double] = [], texts: [String] = [], durations: [Double] = []
         var audio = 0.0
         for round in 1...rounds {
             var total = 0.0
@@ -174,7 +174,7 @@ do {
                 let transcript = try await recognizer.transcribe(file: URL(fileURLWithPath: item.path))
                 let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
                 total += elapsed
-                if round == rounds { latencies.append(elapsed * 1000) }
+                if round == rounds { latencies.append(elapsed * 1000); durations.append(transcript.duration) }
                 texts.append(transcript.text)
                 audio += transcript.duration
             }
@@ -182,6 +182,7 @@ do {
             FileHandle.standardError.write(Data(String(format: "round %d: %.0f× real time\n", round, audio / total).utf8))
         }
         let median = totals.sorted()[totals.count / 2]
+        let fileLatencies = latencies
         latencies.sort()
         var summary: [String: Any] = [
             "model": model.description, "mode": recognizer.mode == .ctc ? "ctc" : "tdt", "files": cases.count,
@@ -196,7 +197,8 @@ do {
         }
         print(json(summary))
         if let out {
-            summary["texts"] = zip(cases, texts).map { ["path": $0.path, "text": $1] }
+            summary["texts"] = cases.indices.map { ["path": cases[$0].path, "text": texts[$0],
+                                                    "duration": durations[$0], "latency_ms": fileLatencies[$0]] }
             try json(summary).write(toFile: out, atomically: true, encoding: .utf8)
         }
     default:

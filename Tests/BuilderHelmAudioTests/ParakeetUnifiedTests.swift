@@ -79,3 +79,35 @@ private let unifiedDirectory = ProcessInfo.processInfo.environment["BUILDERHELM_
         try SpeechRecognizer(directory: URL(fileURLWithPath: unifiedDirectory!), model: .experimentalParakeetV3)
     }
 }
+
+@Test func windowLadderPicksTheSmallestWindowThatHoldsTheRequest() {
+    let ladder = [80000, 160000, 240000, 320000, 480000]
+    let picks = [1, 80000, 80001, 160000, 200000, 240000, 240001, 320000, 320001, 480000, 480001, 2_000_000]
+        .map { ParakeetTdtV3.windowSamples(for: $0, windows: ladder) }
+    #expect(picks == [80000, 80000, 160000, 160000, 240000, 240000, 320000, 320000, 480000, 480000, 480000, 480000])
+    // v3's two windows and legacy single-window configs keep their previous choices.
+    #expect([240000, 240001, 600000].map { ParakeetTdtV3.windowSamples(for: $0, windows: [240000, 480000]) } == [240000, 480000, 480000])
+    #expect(ParakeetTdtV3.windowSamples(for: 400000, windows: nil) == 240000)
+}
+
+@Test func windowListsMustBeOrderedStandardWindowsWithFifteenAndThirtySeconds() throws {
+    func error(for windows: [[String: Any]]) throws -> String {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let config: [String: Any] = ["architecture": "parakeet-unified-en-0.6b", "decoder": "rnnt", "precision": "fp16", "sample_rate": 16000,
+                                     "window_samples": 240000, "blank_id": 1024, "vocabulary_size": 1024, "max_symbols": 10,
+                                     "punctuation": [","], "files": [String: String](), "windows": windows]
+        try JSONSerialization.data(withJSONObject: config).write(to: directory.appendingPathComponent("config.json"))
+        do { _ = try ParakeetTdtV3(directory: directory, cacheDirectory: directory); return "" }
+        catch ParakeetError.badConfig(let reason) { return reason }
+    }
+    let window = { (seconds: Int) -> [String: Any] in ["samples": seconds * 16000, "function": "w\(seconds)"] }
+    // An accepted ladder fails later, at the missing package checksums, not at the window check.
+    #expect(try error(for: [5, 10, 15, 20, 30].map(window)).contains("checksum"))
+    #expect(try error(for: [15, 30].map(window)).contains("checksum"))
+    for bad in [[30, 15], [5, 15], [15, 20], [15, 15, 30], [15, 25, 30]] {
+        #expect(try error(for: bad.map(window)).contains("window functions"), "\(bad)")
+    }
+    #expect(try error(for: [["samples": 240000, "function": "w15"], ["samples": 480000, "function": "long"]]).contains("window functions"))
+}

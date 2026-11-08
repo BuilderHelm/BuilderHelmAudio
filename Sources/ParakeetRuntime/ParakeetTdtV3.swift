@@ -70,6 +70,21 @@ public final class ParakeetTdtV3 {
         let windows: [Window]?
         let encoder_stages: [String]?
         let staged_preprocessor: Bool?
+        /// FP32 predictor and joint weights for the CPU decoder (RNN-T only).
+        let cpu_decoder: CpuDecoder?
+    }
+    struct CpuDecoder: Decodable {
+        struct Tensor: Decodable, Equatable {
+            let name: String, shape: [Int]
+            init(name: String, shape: [Int]) { self.name = name; self.shape = shape }
+            init(from decoder: Decoder) throws {   // ["name", [shape...]]
+                var pair = try decoder.unkeyedContainer()
+                name = try pair.decode(String.self); shape = try pair.decode([Int].self)
+            }
+        }
+        let file: String
+        let dtype: String
+        let tensors: [Tensor]
     }
 
     /// Joint layout and step rule of one supported model.
@@ -105,13 +120,17 @@ public final class ParakeetTdtV3 {
     private let pieces: [String]
     private var wordPunctuation: Set<String> = []
     private let predictor: MLModel, joint: MLModel
+    /// RNN-T decoding on the CPU when the folder ships `cpu_decoder` weights; otherwise the Core ML
+    /// predictor and joint are used.
+    private let cpuDecoder: RnntDecoder?
     private let frontendURL: URL, encoderURL: URL
     private let featureExtractor: MLModel?
     private let featureAudio: MLMultiArray?
     private let encoderTailURL: URL?
     private let encoderComputeUnits: MLComputeUnits
     private var requestWindowSamples = 240000
-    private var activeWindow: WindowModels?
+    private var loadedWindows: [Int: WindowModels] = [:]
+    private let keepsAllWindows: Bool
     // Internal integration-test probe; absent during normal inference.
     var diagnostics: ((String, [Float]) -> Void)?
     private final class WindowModels {
@@ -159,8 +178,16 @@ public final class ParakeetTdtV3 {
     private let candidateHidden: MLMultiArray, candidateCell: MLMultiArray
     private let decoderStep: MLMultiArray, encoderStep: MLMultiArray
 
+    /// `keepsAllWindows` keeps every window function loaded after first use (default on macOS);
+    /// otherwise only the window of the latest request stays loaded (default on iOS).
     public init(directory: URL, computeUnits: MLComputeUnits = .cpuAndNeuralEngine, cacheDirectory: URL,
-                allowExperimentalLongAudio: Bool = true, decoderComputeUnits: MLComputeUnits? = nil) throws {
+                allowExperimentalLongAudio: Bool = true, decoderComputeUnits: MLComputeUnits? = nil,
+                keepsAllWindows: Bool? = nil) throws {
+        #if os(iOS)
+        self.keepsAllWindows = keepsAllWindows ?? false
+        #else
+        self.keepsAllWindows = keepsAllWindows ?? true
+        #endif
         #if os(iOS)
         guard computeUnits != .cpuAndGPU && computeUnits != .all,
               decoderComputeUnits != .cpuAndGPU && decoderComputeUnits != .all else {
@@ -176,8 +203,12 @@ public final class ParakeetTdtV3 {
         else { throw ParakeetError.badConfig("Unsupported v3 tensor/decoder contract") }
         self.contract = contract
         if let windows = config.windows {
-            guard windows.map(\.samples) == [240000,480000], windows.map(\.function) == ["w15","w30"] else {
-                throw ParakeetError.badConfig("Expected ordered w15/w30 window functions")
+            // Ascending standard windows named w<seconds>; long audio relies on the 15 s and 30 s ones.
+            let samples = windows.map(\.samples)
+            guard samples == samples.sorted(), Set(samples).count == samples.count,
+                  Set(samples).isSubset(of: [80000, 160000, 240000, 320000, 480000]), samples.contains(240000), samples.contains(480000),
+                  windows.allSatisfy({ $0.function == "w\($0.samples / 16000)" }) else {
+                throw ParakeetError.badConfig("Expected ordered w<seconds> window functions including w15 and w30")
             }
         }
         guard config.encoder_stages == nil || config.encoder_stages == ["Encoder", "EncoderTail"] else {
@@ -193,6 +224,11 @@ public final class ParakeetTdtV3 {
             }
         }
         let manifest = config.files
+        if let cpu = config.cpu_decoder {
+            guard contract.isRNNT, cpu.dtype == "float32", manifest[cpu.file] != nil,
+                  cpu.tensors == RnntDecoder.layout(tokens: contract.blank + 1).map({ CpuDecoder.Tensor(name: $0.0, shape: $0.1) })
+            else { throw ParakeetError.badConfig("Unsupported CPU decoder contract") }
+        }
         try Self.verify(manifest, in: directory, cache: cacheDirectory)
         pieces = try decoder.decode([String].self, from: Data(contentsOf: directory.appendingPathComponent("vocab.json")))
         guard pieces.count == contract.blank, pieces.first == "<unk>" else {
@@ -222,6 +258,9 @@ public final class ParakeetTdtV3 {
         } else { featureExtractor = nil; featureAudio = nil }
         predictor = try load("Predictor", decoderComputeUnits ?? computeUnits)
         joint = try load("Joint", decoderComputeUnits ?? computeUnits)
+        cpuDecoder = try config.cpu_decoder.map {
+            try RnntDecoder(url: directory.appendingPathComponent($0.file), tokens: contract.blank + 1)
+        }
         targets = try Self.array([1, 1], .int32)
         hidden = try Self.array([2, 1, 640]); cell = try Self.array([2, 1, 640])
         candidateHidden = try Self.array([2, 1, 640]); candidateCell = try Self.array([2, 1, 640])
@@ -274,12 +313,19 @@ public final class ParakeetTdtV3 {
     }
 
     private func windowSize(for count: Int) -> Int {
-        count > 240000 && config.windows != nil ? 480000 : 240000
+        Self.windowSamples(for: count, windows: config.windows?.map(\.samples))
+    }
+    /// The smallest window that holds the request; longer audio is cut into 30 s windows.
+    /// Legacy single-window configs always use 15 s.
+    static func windowSamples(for count: Int, windows: [Int]?) -> Int {
+        guard let windows else { return 240000 }
+        return windows.first(where: { count <= $0 }) ?? 480000
     }
     private func windowModels() throws -> WindowModels {
-        if activeWindow?.window.samples == requestWindowSamples { return activeWindow! }
-        // Retain one encoder function at a time to bound device memory.
-        autoreleasepool { activeWindow = nil }
+        if let loaded = loadedWindows[requestWindowSamples] { return loaded }
+        // On iOS, retain one encoder function at a time to bound device memory. On the Mac every
+        // window stays loaded: reloading a function costs about 100 ms per switch of window size.
+        if !keepsAllWindows { autoreleasepool { loadedWindows.removeAll() } }
         let window = config.windows?.first(where: { $0.samples == requestWindowSamples })
             ?? Window(samples: 240000, function: nil)
         let current = try autoreleasepool { () throws -> WindowModels in
@@ -294,7 +340,7 @@ public final class ParakeetTdtV3 {
             }
             return try WindowModels(window:window,frontend:load("Preprocessor",.cpuOnly),encoder:load("Encoder",encoderComputeUnits),encoderTail:encoderTailURL == nil ? nil : load("EncoderTail",encoderComputeUnits),stagedPreprocessor:config.staged_preprocessor == true)
         }
-        activeWindow = current
+        loadedWindows[requestWindowSamples] = current
         return current
     }
 
@@ -309,7 +355,7 @@ public final class ParakeetTdtV3 {
         // Keep short file and PCM requests on exactly the same decode path.
         if buffer.count <= requestWindowSamples {
             return try autoreleasepool {
-                try requestWindowSamples == 480000
+                try requestWindowSamples > 240000
                     ? decodeLongWindow(buffer, checkCancellation: checkCancellation)
                     : decode(buffer, checkCancellation: checkCancellation)
             }
@@ -334,7 +380,7 @@ public final class ParakeetTdtV3 {
         requestWindowSamples = windowSize(for: samples.count)
         if samples.count <= requestWindowSamples {
             return try autoreleasepool {
-                try requestWindowSamples == 480000
+                try requestWindowSamples > 240000
                     ? decodeLongWindow(samples, checkCancellation: checkCancellation)
                     : decode(samples, checkCancellation: checkCancellation)
             }
@@ -449,7 +495,7 @@ public final class ParakeetTdtV3 {
 
     private func decodeLongWindow(_ samples: [Float], retryDepth: Int = 0, checkCancellation: () throws -> Void) throws -> Result {
         let first = try autoreleasepool { try decode(samples, checkCancellation: checkCancellation) }
-        if retryDepth == 0, requestWindowSamples == 480000, !first.tokenIDs.isEmpty {
+        if retryDepth == 0, requestWindowSamples > 240000, !first.tokenIDs.isEmpty {
             return try recoverPartialBlanks(first, samples: samples, checkCancellation: checkCancellation)
         }
         // The source model can blank an entire speech window at an unlucky cut.
@@ -665,6 +711,7 @@ public final class ParakeetTdtV3 {
         Self.zero(hidden); Self.zero(cell)
         let (features, frames) = try encode(samples, checkCancellation: checkCancellation)
         diagnose("encoder", features)
+        if let cpuDecoder { return try decodeOnCPU(cpuDecoder, features: features, frames: frames, checkCancellation: checkCancellation) }
         let blank = contract.blank, logitCount = contract.logitCount
         var time = 0, symbols = 0, lastToken = blank, needsPrediction = true
         var ids: [Int] = [], times: [Int] = [], spans: [Int] = [], confidences: [Float] = []
@@ -727,11 +774,41 @@ public final class ParakeetTdtV3 {
         return Result(text: text(ids), tokenIDs: ids, emissionFrames: times, durations: spans, confidences: confidences)
     }
 
+    /// Greedy RNN-T with the CPU decoder, with the same stepping rule as `decode`: stay on the frame
+    /// after a token, advance on blank or after `max_symbols` tokens.
+    private func decodeOnCPU(_ decoder: RnntDecoder, features: MLMultiArray, frames: Int,
+                             checkCancellation: () throws -> Void) throws -> Result {
+        let shape = features.shape.map(\.intValue), strides = features.strides.map(\.intValue)
+        guard features.dataType == .float32, shape.count == 3, shape[1] == 1024, strides[2] == 1, strides[1] == shape[2] else {
+            throw ParakeetError.badConfig("Expected a contiguous float32 encoder snapshot")
+        }
+        decoder.project(features.dataPointer.assumingMemoryBound(to: Float.self), frames: frames, capacity: shape[2])
+        decoder.reset()
+        let blank = contract.blank
+        var time = 0, symbols = 0
+        var ids: [Int] = [], times: [Int] = [], confidences: [Float] = []
+        while time < frames {
+            if symbols == 0 { try checkCancellation() }
+            let (token, confidence) = decoder.decide(frame: time)
+            if token == blank {
+                time += 1; symbols = 0
+                continue
+            }
+            ids.append(token); times.append(time); confidences.append(confidence)
+            decoder.step(token)
+            symbols += 1
+            if symbols == config.max_symbols { time += 1; symbols = 0 }
+        }
+        return Result(text: text(ids), tokenIDs: ids, emissionFrames: times,
+                      durations: Array(repeating: 1, count: ids.count), confidences: confidences)
+    }
+
     // MARK: - Warm-up
 
     /// Loads and runs every encoder window function once (15 s, then 30 s), so the Neural Engine
     /// compiles them now rather than during a user's first short or first long recording.
-    /// Leaves the 15 s window resident. Safe to call again; later calls hit the compile cache.
+    /// Every window then stays loaded on macOS (only the 15 s window on iOS). Safe to call again;
+    /// later calls hit the compile cache.
     public func warmUp() throws {
         let sizes = config.windows?.map(\.samples) ?? [240000]
         for size in sizes.reversed() {

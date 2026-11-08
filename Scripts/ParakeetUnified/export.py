@@ -14,6 +14,12 @@ CHECKPOINT_SHA256='ec23ed9150c8fde49072c3e2d61678ab903dbcef389d658db833420cbc1da
 SOURCE_REVISION='fe53cd885760c96b6a5f51a0bfd362cb4584a98b'
 SOURCE_REPOSITORY='nvidia/parakeet-unified-en-0.6b'
 LICENSE='NVIDIA Open Model License. https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/'
+CPU_DECODER='RnntDecoder.bin'
+CPU_DECODER_TENSORS=[('embed',(VOCAB+1,640))]+[(f'lstm{l}_{k}',(2560,640) if k.startswith('w') else (2560,)) for l in (0,1) for k in ('w_ih','w_hh','b_ih','b_hh')]+[
+ ('joint_enc_w',(640,1024)),('joint_enc_b',(640,)),('joint_pred_w',(640,640)),('joint_pred_b',(640,)),('joint_out_w',(VOCAB+1,640)),('joint_out_b',(VOCAB+1,))]
+CPU_DECODER_SOURCE={'embed':'decoder.prediction.embed.weight',
+ **{f'lstm{l}_{k}':'decoder.prediction.dec_rnn.lstm.'+('weight' if k[0]=='w' else 'bias')+f'_{k[2:]}_l{l}' for l in (0,1) for k in ('w_ih','w_hh','b_ih','b_hh')},
+ 'joint_enc_w':'joint.enc.weight','joint_enc_b':'joint.enc.bias','joint_pred_w':'joint.pred.weight','joint_pred_b':'joint.pred.bias','joint_out_w':'joint.joint_net.2.weight','joint_out_b':'joint.joint_net.2.bias'}
 
 def sha(path):
  with Path(path).open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
@@ -29,8 +35,9 @@ def main():
  if sha(args.nemo)!=CHECKPOINT_SHA256:raise ValueError('Expected pinned original NVIDIA parakeet-unified-en-0.6b checkpoint')
  with wave.open(str(args.example_wav),'rb') as wav:
   if (wav.getframerate(),wav.getnchannels(),wav.getsampwidth(),wav.getcomptype())!=(16000,1,2,'NONE'):raise ValueError('Example must be mono PCM16 WAV at 16 kHz')
-  if not 8000<=wav.getnframes()<=args.window_seconds*16000:raise ValueError('Provide real speech within the selected window')
-  samples=np.frombuffer(wav.readframes(wav.getnframes()),dtype='<i2').astype(np.float32)/32768
+  if wav.getnframes()<8000:raise ValueError('Provide at least 0.5 s of real speech')
+  # A longer example is cut to the selected window, so one example serves every window size.
+  samples=np.frombuffer(wav.readframes(min(wav.getnframes(),args.window_seconds*16000)),dtype='<i2').astype(np.float32)/32768
  torch.manual_seed(0);torch.set_num_threads(4)
  args.out.mkdir(parents=True)
  with tempfile.TemporaryDirectory(prefix='bha-unified-weights-') as folder,tarfile.open(args.nemo) as archive:
@@ -76,6 +83,13 @@ def main():
    converted.save(str(args.out/(name+'.mlpackage')))
    del converted,traced;gc.collect()
   write(args.out/'vocab.json',pieces)
+  if {'predictor','joint'}<=set(args.parts):
+   # Original FP32 predictor and joint for the runtime's CPU decoder, little-endian in this order.
+   with (args.out/CPU_DECODER).open('wb') as f:
+    for name,shape in CPU_DECODER_TENSORS:
+     tensor=state[CPU_DECODER_SOURCE[name]].float().contiguous()
+     if tuple(tensor.shape)!=tuple(shape):raise ValueError(f'Unexpected {name} shape {tuple(tensor.shape)}')
+     f.write(tensor.numpy().astype('<f4').tobytes())
   punctuation=sorted({c for piece in pieces if not re.match(r'^\[.*\]$|^<.*>$|^##|^▁|^\s*$',piece) for c in piece if unicodedata.category(c).startswith('P')})
   files={str(f.relative_to(args.out)):sha(f) for f in args.out.rglob('*') if f.is_file()}
   write(args.out/'export-record.json',dict(source_repository=SOURCE_REPOSITORY,source_revision=SOURCE_REVISION,source_checkpoint_sha256=CHECKPOINT_SHA256,
@@ -83,7 +97,8 @@ def main():
    validation='Example Torch reference only; full independent NeMo/CoreML parity must be run before accepting a new exporter revision.'))
   if args.window_seconds == 15 and set(args.parts)==set(contracts):
    write(args.out/'config.json',dict(architecture='parakeet-unified-en-0.6b',decoder='rnnt',mode='offline',precision=args.precision,sample_rate=16000,window_samples=args.window_seconds*16000,blank_id=BLANK,vocabulary_size=VOCAB,
-    max_symbols=10,punctuation=punctuation,files={k:v for k,v in files.items() if k.endswith('vocab.json') or '.mlpackage/' in k},
+    max_symbols=10,punctuation=punctuation,files={k:v for k,v in files.items() if k.endswith('vocab.json') or k==CPU_DECODER or '.mlpackage/' in k},
+    cpu_decoder=dict(file=CPU_DECODER,dtype='float32',tensors=[[n,list(s)] for n,s in CPU_DECODER_TENSORS]),
     source_revision=SOURCE_REVISION,frontend_precision='fp32',license='NVIDIA Open Model License',experimental_long_audio=False))
  print(args.out)
 if __name__=='__main__':main()

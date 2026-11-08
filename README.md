@@ -62,6 +62,7 @@ print(transcript.text)
 
 - **Fast English models** — about 1,000× real time on a Mac (M5), 400–600× on an iPhone 13.
 - **Multilingual** — Parakeet V3 recognizes 25 European languages with original FP16 weights.
+- **English with punctuation** — Parakeet Unified writes punctuation and capitalization, matches NVIDIA's original model's accuracy, and stays fast while the GPU is busy.
 - **English accuracy** — 2.46% WER on LibriSpeech test-clean (110M TDT).
 - **Simple** — one call to download and load, one call to transcribe.
 - **Token and word times** — the 110M TDT + CTC model returns token times and a CTC transcript from the same pass; V3 returns token times and words with start, end and confidence.
@@ -80,8 +81,10 @@ print(transcript.text)
 | **`.parakeetTdtCtc110M`** | Transcription with token times | TDT text + token times, CTC text | 144 MB | [Parakeet-TDT-CTC-110M-CoreML](https://huggingface.co/BuilderHelm/Parakeet-TDT-CTC-110M-CoreML) |
 | **`.parakeetCtc110M`** | Fastest transcription, keyword spotting | CTC text | 124 MB | [Parakeet-CTC-110M-CoreML](https://huggingface.co/BuilderHelm/Parakeet-CTC-110M-CoreML) |
 | **`.parakeetTdtV3`** | Transcription in 25 languages | TDT text | 1.27 GB | [Parakeet-TDT-0.6B-V3-CoreML](https://huggingface.co/BuilderHelm/Parakeet-TDT-0.6B-V3-CoreML) |
+| **`.parakeetUnifiedEnInt8`** | English dictation with punctuation | RNN-T text + token and word times | 0.71 GB | [Parakeet-Unified-EN-0.6B-CoreML](https://huggingface.co/BuilderHelm/Parakeet-Unified-EN-0.6B-CoreML) |
+| **`.parakeetUnifiedEn`** | The same, unquantized FP16 encoder | RNN-T text + token and word times | 1.34 GB | [Parakeet-Unified-EN-0.6B-CoreML](https://huggingface.co/BuilderHelm/Parakeet-Unified-EN-0.6B-CoreML) |
 
-The two 110M models are English-only conversions of NVIDIA's [Parakeet-TDT-CTC-110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m) with INT8 encoders. V3 converts [Parakeet-TDT-0.6B-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) with unquantized FP16 weights; evaluated INT8/INT4 candidates failed the language accuracy gates. Each descriptor pins an immutable Hugging Face commit and every file's SHA-256.
+The two 110M models are English-only conversions of NVIDIA's [Parakeet-TDT-CTC-110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m) with INT8 encoders. V3 converts [Parakeet-TDT-0.6B-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) with unquantized FP16 weights; evaluated INT8/INT4 candidates failed the language accuracy gates. Parakeet Unified converts [parakeet-unified-en-0.6b](https://huggingface.co/nvidia/parakeet-unified-en-0.6b) (offline mode) in two downloads from one repository: an unquantized FP16 encoder, and a weight-only INT8 encoder with the same accuracy. Each descriptor pins an immutable Hugging Face commit and every file's SHA-256.
 
 ---
 
@@ -144,6 +147,17 @@ V3 automatically recognizes Bulgarian, Croatian, Czech, Danish, Dutch, English, 
 Offline recordings have no fixed duration limit. Short requests use a 15-second function; longer requests use a shared-weight 30-second function, with quiet-pause cuts and overlap token matching. Reuse one recognizer: the first request at a different window size may incur preparation cost. V3 returns text, token times and `words` (start, end and confidence, NeMo-compatible), with `ctcTranscript == nil`. `alternatives(samples:beamSize:nbest:)` returns ranked beam-search candidates for recordings of at most 30 s. CTC probabilities, keyword spotting, segment timestamps and live partial results are unavailable.
 
 The Neural Engine compiles each V3 window the first time an app loads it on a macOS build, which takes about 20 s. Call `prepare()` once after loading (for example during setup) so the first recording does not wait for it. Later loads take about 0.1 s: files verified once are not re-hashed until they change. See [V3 validation and limitations](Documentation/ParakeetV3.md).
+
+### English with punctuation: Parakeet Unified
+
+```swift
+let recognizer = try await SpeechRecognizer.load(.parakeetUnifiedEnInt8)
+try await recognizer.prepare()
+let transcript = try await recognizer.transcribe(file: audioURL)
+print(transcript.text)   // "Hi Kabir, I am out of office until the 15th."
+```
+
+Each request uses the smallest of five shared-weight windows (5, 10, 15, 20 or 30 s), and on the Mac every window stays loaded, so recordings of different lengths never reload the encoder. Longer recordings use 30-second windows with the same quiet-pause cuts and overlap matching as V3. Unified returns text, token times and `words` with start, end and confidence, following NeMo's RNN-T timestamps; CTC, keyword spotting and ranked alternatives are unavailable. The first load after installation or a macOS update compiles the five windows, about 45 s on M5 for INT8; call `prepare()` during setup. On ZenVoice Speech Bench v1 (M5) the INT8 download scores 8.0% WER at 219× real time with a typical delay of 0.03 s. See [Parakeet Unified](Documentation/ParakeetUnified.md).
 
 ### Transcribe samples
 
@@ -291,7 +305,7 @@ swift run -c release bhaudio benchmark cases.json --rounds 3
 - Swift 6 (Xcode 16 or later)
 - A device with a Neural Engine for full speed; `computeUnits: .gpu` or `.cpu` also work
 - Apple Silicon Macs: M1 and later; physical Mac validation uses M5. Other-chip performance is unmeasured.
-- Disk: model download plus additional space for CoreML compilation (124–144 MB downloads for 110M; 1.27 GB for V3)
+- Disk: model download plus additional space for CoreML compilation (124–144 MB downloads for 110M; 1.27 GB for V3; 0.71 or 1.34 GB for Parakeet Unified)
 - Network on first load only, to download the model from Hugging Face
 
 ---
@@ -395,7 +409,7 @@ BuilderHelmAudio/
 
 ## Status
 
-Version 0.3.0 adds V3 token and word timestamps with confidences, ranked alternatives, `prepare()` and faster repeat loads. Version 0.2.0 added the multilingual V3 FP16 model, long-recording joins, runtime selection, cancellation and capability-aware APIs. Physical validation uses an Apple M5 Mac (macOS 27.2) and iPhone 13 (iOS 27.2). The compatibility target is all Apple Silicon Macs, M1 onward, with macOS 15+, and iOS 18+. See [V3 validation](Documentation/ParakeetV3.md) for accuracy, quantization decisions, sustained testing and coverage limits.
+Version 0.4.0 adds Parakeet Unified EN (FP16 and INT8 encoder downloads, RNN-T decoding, a five-window ladder, CPU decoding and resident windows on macOS) and independent model variants. Version 0.3.0 added V3 token and word timestamps with confidences, ranked alternatives, `prepare()` and faster repeat loads. Version 0.2.0 added the multilingual V3 FP16 model, long-recording joins, runtime selection, cancellation and capability-aware APIs. Physical validation uses an Apple M5 Mac (macOS 27.2) and iPhone 13 (iOS 27.2). The compatibility target is all Apple Silicon Macs, M1 onward, with macOS 15+, and iOS 18+. See [V3 validation](Documentation/ParakeetV3.md) for accuracy, quantization decisions, sustained testing and coverage limits.
 
 Voice activity detection, live partial transcription, V3 segment timestamps, subtitles, diarization, speech synthesis, noise suppression and echo cancellation are separate future work.
 

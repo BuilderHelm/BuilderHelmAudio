@@ -1,9 +1,10 @@
-"""Add bounded DFT and full-window normalization functions without changing weights.
+"""Add bounded DFT and full-window normalization functions (one per window) without changing weights.
 
 Requires Python 3.11 and coremltools==9.0. Source and destination are complete Unified
 model directories. The source remains immutable; the destination must not exist.
 """
 import argparse
+import re
 from copy import deepcopy
 import hashlib
 import json
@@ -44,8 +45,8 @@ def prune(block, outputs, inputs):
 
 def stage(spec):
     descriptions = {f.name: deepcopy(f) for f in spec.description.functions}
-    if set(descriptions) != {"w15", "w30"}:
-        raise ValueError("Expected the original Unified w15/w30 frontend")
+    if "w15" not in descriptions or "w30" not in descriptions or not all(re.fullmatch(r"w\d+", name) for name in descriptions):
+        raise ValueError("Expected the original Unified window frontend functions")
     features = deepcopy(spec.mlProgram.functions["w15"])
     waveform = deepcopy(features.inputs[0])
     waveform.name = "waveform"

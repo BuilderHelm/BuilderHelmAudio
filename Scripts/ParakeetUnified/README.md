@@ -22,27 +22,28 @@ Compared with our v3 export, the encoder has biases on every Linear and Conv1d e
 
 ## Steps
 
-1. `export.py` reconstructs the source architecture from the original weights, loads component state dictionaries strictly and converts each part to an ML Program. `--precision fp16` gives FP16 encoder/predictor/joint weights and compute; the frontend and all floating-point interfaces remain FP32. `--window-seconds 15` with all parts writes a loadable `config.json`; `--window-seconds 30 --parts frontend encoder` gives the long window.
-2. `merge_windows.py --split-encoder` combines the 15- and 30-second exports into `w15`/`w30` functions with Core ML constant deduplication, and bisects the FP16 encoder into two approximately equal-weight sequential programs, `Encoder` and `EncoderTail`, each below 1 GB.
-3. `stage_preprocessor.py` adds `features`, `normalize_w15` and `normalize_w30` to the preprocessor and sets `staged_preprocessor: true`. The runtime computes FP32 pre-emphasis, extracts at most 401 raw log-mel frames per call, then normalizes the complete window. Original functions and weight bytes are preserved.
-4. `quantize_int8.py` writes `variants/int8/`: each window's FP16 encoder compressed with weight-only, per-output-channel, symmetric linear INT8 (compute stays FP16), merged into one `w15`/`w30` encoder that is not partitioned. Its `config.json` lists the root checksums of the shared frontend, predictor, joint and vocabulary, so a downloaded variant folder is self-contained.
+1. `export.py` reconstructs the source architecture from the original weights, loads component state dictionaries strictly and converts each part to an ML Program. `--precision fp16` gives FP16 encoder/predictor/joint weights and compute; the frontend and all floating-point interfaces remain FP32. With the predictor and joint it also writes `RnntDecoder.bin`, their original FP32 weights for the runtime's CPU decoder. `--window-seconds 15` with all parts writes a loadable `config.json`; `--window-seconds 5|10|20|30 --parts frontend encoder` gives the other windows. A longer example clip is cut to the window.
+2. `merge_windows.py --split-encoder` combines the 5-, 10-, 15-, 20- and 30-second exports into `w5` … `w30` functions with Core ML constant deduplication (about 3% larger than one window), and bisects the FP16 encoder into two approximately equal-weight sequential programs, `Encoder` and `EncoderTail`, each below 1 GB. Each request uses the smallest window that holds it.
+3. `stage_preprocessor.py` adds `features` and one `normalize_w<seconds>` per window to the preprocessor and sets `staged_preprocessor: true`. The runtime computes FP32 pre-emphasis, extracts at most 401 raw log-mel frames per call, then normalizes the complete window. Original functions and weight bytes are preserved.
+4. `quantize_int8.py` writes `variants/int8/`: each window's FP16 encoder compressed with weight-only, per-output-channel, symmetric linear INT8 (compute stays FP16), merged into one five-window encoder that is not partitioned. Its `config.json` lists the root checksums of the shared frontend, predictor, joint, CPU decoder weights and vocabulary, so a downloaded variant folder is self-contained.
 
 ## Release layout
 
 ```
 release/
   config.json  vocab.json  merge-record.json
-  Preprocessor.mlpackage   (FP32; w15, w30, features, normalize_w15, normalize_w30)
-  Encoder.mlpackage        (FP16; w15, w30; first half)
-  EncoderTail.mlpackage    (FP16; w15, w30; second half)
+  Preprocessor.mlpackage   (FP32; w5 … w30, features, normalize_w5 … normalize_w30)
+  Encoder.mlpackage        (FP16; w5, w10, w15, w20, w30; first half)
+  EncoderTail.mlpackage    (FP16; same windows; second half)
   Predictor.mlpackage      (FP16)
   Joint.mlpackage          (FP16)
+  RnntDecoder.bin          (FP32 predictor and joint for the CPU decoder)
   variants/int8/
     config.json  variant-record.json
-    Encoder.mlpackage      (INT8 weights, FP16 compute; w15, w30)
+    Encoder.mlpackage      (INT8 weights, FP16 compute; same windows)
 ```
 
-About 1.2 GB for FP16 and about 0.6 GB for the INT8 encoder plus the shared 21 MB.
+The FP16 download is 1.34 GB; the INT8 download (its encoder plus the shared files) is 0.71 GB. Published as [BuilderHelm/Parakeet-Unified-EN-0.6B-CoreML](https://huggingface.co/BuilderHelm/Parakeet-Unified-EN-0.6B-CoreML) 1.0.0.
 
 ## Validation
 

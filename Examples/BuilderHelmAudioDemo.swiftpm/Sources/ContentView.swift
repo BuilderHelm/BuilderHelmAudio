@@ -12,6 +12,8 @@ struct ContentView: View {
                         Text("Parakeet CTC 110M").tag(AsrModel.parakeetCtc110M)
                         Text("Parakeet TDT + CTC 110M").tag(AsrModel.parakeetTdtCtc110M)
                         Text("Parakeet V3 · 25 languages").tag(AsrModel.parakeetTdtV3)
+                        Text("Parakeet Unified · English INT8").tag(AsrModel.parakeetUnifiedEnInt8)
+                        Text("Parakeet Unified · English FP16").tag(AsrModel.parakeetUnifiedEn)
                     }
                     if let fraction = demo.downloadFraction {
                         ProgressView(value: fraction) { Text("Downloading \(Int(fraction * 100))%") }
@@ -61,9 +63,11 @@ struct ContentView: View {
             .navigationTitle("BuilderHelm Audio")
         }
         .task {
-            // xcrun simctl launch --console <device> ai.builderhelm.audio.demo --autobenchmark
-            guard ProcessInfo.processInfo.arguments.contains("--autobenchmark") else { return }
-            for model in AsrModel.all {
+            // xcrun simctl launch --console <device> ai.builderhelm.audio.demo --autobenchmark [model-id,...]
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let flag = arguments.firstIndex(of: "--autobenchmark") else { return }
+            let chosen = arguments.indices.contains(flag + 1) ? Set(arguments[flag + 1].split(separator: ",").map(String.init)) : []
+            for model in AsrModel.all where chosen.isEmpty || chosen.contains(model.id) {
                 demo.model = model
                 for sample in DemoModel.Sample.allCases {
                     await demo.benchmark(sample)

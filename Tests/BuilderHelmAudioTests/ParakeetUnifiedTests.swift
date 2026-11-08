@@ -79,3 +79,57 @@ private let unifiedDirectory = ProcessInfo.processInfo.environment["BUILDERHELM_
         try SpeechRecognizer(directory: URL(fileURLWithPath: unifiedDirectory!), model: .experimentalParakeetV3)
     }
 }
+
+@Test func windowLadderPicksTheSmallestWindowThatHoldsTheRequest() {
+    let ladder = [80000, 160000, 240000, 320000, 480000]
+    let picks = [1, 80000, 80001, 160000, 200000, 240000, 240001, 320000, 320001, 480000, 480001, 2_000_000]
+        .map { ParakeetTdtV3.windowSamples(for: $0, windows: ladder) }
+    #expect(picks == [80000, 80000, 160000, 160000, 240000, 240000, 320000, 320000, 480000, 480000, 480000, 480000])
+    // v3's two windows and legacy single-window configs keep their previous choices.
+    #expect([240000, 240001, 600000].map { ParakeetTdtV3.windowSamples(for: $0, windows: [240000, 480000]) } == [240000, 480000, 480000])
+    #expect(ParakeetTdtV3.windowSamples(for: 400000, windows: nil) == 240000)
+}
+
+@Test func windowListsMustBeOrderedStandardWindowsWithFifteenAndThirtySeconds() throws {
+    func error(for windows: [[String: Any]]) throws -> String {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let config: [String: Any] = ["architecture": "parakeet-unified-en-0.6b", "decoder": "rnnt", "precision": "fp16", "sample_rate": 16000,
+                                     "window_samples": 240000, "blank_id": 1024, "vocabulary_size": 1024, "max_symbols": 10,
+                                     "punctuation": [","], "files": [String: String](), "windows": windows]
+        try JSONSerialization.data(withJSONObject: config).write(to: directory.appendingPathComponent("config.json"))
+        do { _ = try ParakeetTdtV3(directory: directory, cacheDirectory: directory); return "" }
+        catch ParakeetError.badConfig(let reason) { return reason }
+    }
+    let window = { (seconds: Int) -> [String: Any] in ["samples": seconds * 16000, "function": "w\(seconds)"] }
+    // An accepted ladder fails later, at the missing package checksums, not at the window check.
+    #expect(try error(for: [5, 10, 15, 20, 30].map(window)).contains("checksum"))
+    #expect(try error(for: [15, 30].map(window)).contains("checksum"))
+    for bad in [[30, 15], [5, 15], [15, 20], [15, 15, 30], [15, 25, 30]] {
+        #expect(try error(for: bad.map(window)).contains("window functions"), "\(bad)")
+    }
+    #expect(try error(for: [["samples": 240000, "function": "w15"], ["samples": 480000, "function": "long"]]).contains("window functions"))
+}
+
+@Test func publishedUnifiedDescriptorsPinOneRepositoryWithIndependentVariants() throws {
+    let fp16 = AsrModel.parakeetUnifiedEn, int8 = AsrModel.parakeetUnifiedEnInt8
+    for model in [fp16, int8] {
+        #expect(AsrModel.all.contains(model) && AsrModel.named(model.id) == model)
+        #expect(model.repository == "BuilderHelm/Parakeet-Unified-EN-0.6B-CoreML" && model.revision.count == 40)
+        #expect(try RuntimeSelection.resolve(model: model, mode: .tdt).capabilities == [.rnnt, .tokenTimestamps, .wordTimestamps])
+        #expect(Set(model.files.map(\.path)).count == model.files.count && model.files.contains { $0.path == "config.json" })
+        #expect(model.files.contains { $0.path == "RnntDecoder.bin" } && model.files.allSatisfy { $0.sha256.count == 64 })
+    }
+    #expect(fp16.revision == int8.revision && fp16.variant == nil && int8.variant == "int8")
+    #expect(fp16.files.contains { $0.path.hasPrefix("EncoderTail.mlpackage/") })
+    #expect(!int8.files.contains { $0.path.hasPrefix("EncoderTail.mlpackage/") })
+    // The INT8 config and encoder come from variants/int8; shared packages keep their root paths.
+    for file in int8.files {
+        let fromVariant = file.path == "config.json" || file.path.hasPrefix("Encoder.mlpackage/")
+        #expect(file.repositoryPath == (fromVariant ? "variants/int8/" + file.path : file.path), "\(file.path)")
+    }
+    #expect((1_300_000_000...1_400_000_000).contains(fp16.totalBytes) && (650_000_000...750_000_000).contains(int8.totalBytes))
+    let store = ModelStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    #expect(store.directory(for: fp16) != store.directory(for: int8))
+}

@@ -36,7 +36,9 @@ public enum BuilderHelmAudioError: Error, LocalizedError, Equatable {
 
 /// Downloads pinned models from Hugging Face, checks every file's SHA-256 and keeps them on device.
 ///
-/// Files live under `root/Models/<repository>/<revision>/`. A model is only marked ready after every
+/// Files live under `root/Models/<repository>/<revision>/` for legacy descriptors, or
+/// `root/Models/<repository>/Variants/<revision>/<variant>/` for explicit variants.
+/// A model is only marked ready after every
 /// file has been verified, so an interrupted download resumes file by file on the next call.
 public actor ModelStore {
     public static let shared = ModelStore()
@@ -65,9 +67,15 @@ public actor ModelStore {
         if model.repository.isEmpty || model.revision.isEmpty {
             return root.appendingPathComponent("LocalOnly", isDirectory: true).appendingPathComponent(model.id, isDirectory: true)
         }
-        return root.appendingPathComponent("Models", isDirectory: true)
+        let repositoryDirectory = root.appendingPathComponent("Models", isDirectory: true)
             .appendingPathComponent(model.repository, isDirectory: true)
+        guard let variant = model.variant else {
+            return repositoryDirectory.appendingPathComponent(model.revision, isDirectory: true)
+        }
+        // A sibling tree keeps removing a legacy FP16 revision from deleting explicit variants.
+        return repositoryDirectory.appendingPathComponent("Variants", isDirectory: true)
             .appendingPathComponent(model.revision, isDirectory: true)
+            .appendingPathComponent(variant, isDirectory: true)
     }
 
     /// Where CoreML keeps compiled models for this store.
@@ -140,7 +148,7 @@ public actor ModelStore {
     private func fetch(_ file: AsrModel.File, of model: AsrModel, to target: URL,
                        written: @escaping @Sendable (Int64) -> Void) async throws {
         let url = baseURL.appendingPathComponent(model.repository).appendingPathComponent("resolve")
-            .appendingPathComponent(model.revision).appendingPathComponent(file.path)
+            .appendingPathComponent(model.revision).appendingPathComponent(file.repositoryPath)
         var lastError: Error = BuilderHelmAudioError.downloadFailed(file: file.path, status: 0)
         for attempt in 0..<3 {
             try Task.checkCancellation()

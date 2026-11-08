@@ -182,6 +182,104 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
         supportedLanguages: ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
         capabilities: .parakeetV3Tdt, ctcConfiguration: nil, files: [])
 
+    /// Parakeet Unified EN 0.6B (offline mode) with an unquantized FP16 encoder: English RNN-T text with
+    /// punctuation and capitalization, NeMo-compatible token and word timestamps and confidences.
+    /// Requests use the smallest of five shared-weight windows (5–30 s); longer recordings use 30 s windows.
+    public static let parakeetUnifiedEn = AsrModel(
+        id: "parakeet-unified-en-0.6b",
+        repository: "BuilderHelm/Parakeet-Unified-EN-0.6B-CoreML",
+        version: "1.0.0",
+        revision: "97e349c3dee2a9f683a435aac1157374a465d613",
+        architecture: .parakeetUnifiedEn,
+        supportedLanguages: ["en"],
+        capabilities: .parakeetUnifiedRnnt, ctcConfiguration: nil,
+        files: [
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 1_602_559,
+                 sha256: "4748cdb9f17ee96ad48dd64f08004e0c093787d0670011c1a055c61ffea99e5a"),
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 637_704_128,
+                 sha256: "dc0dea41e39cd0de8fa4496103ec9ca6d7598958c14ee07ba6a3632687afcbb2"),
+            File(path: "Encoder.mlpackage/Manifest.json", size: 617,
+                 sha256: "7eed98ace5c004204e33250a94c6afeff722bf7b6d61139a7c7896df51470291"),
+            File(path: "EncoderTail.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 1_542_902,
+                 sha256: "14db247a37dba8e86c17dde238f910676db5039c283929e1759527909b368c99"),
+            File(path: "EncoderTail.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 629_032_384,
+                 sha256: "b1ecda2e02d4f26d4c0e699e9d2d2d5c45bc677c709700a28ad2e93f55d3fd53"),
+            File(path: "EncoderTail.mlpackage/Manifest.json", size: 617,
+                 sha256: "c7ceae9a4ea0f5f31eccaf4e533b2428bf1b4600d5905d07e9c9496c217b360a"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 4_722,
+                 sha256: "cc5d61412ce04db6d6266598689049c1c45d3401509ec2a5f2b56c546ace6191"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 3_446_978,
+                 sha256: "06831afa6d1beb0c0b10350ebf7886bc37638e951d14e738d7e06fbd2a05012f"),
+            File(path: "Joint.mlpackage/Manifest.json", size: 617,
+                 sha256: "8c4ef577c0bc99e629664e37bf449284c08b6497a2d2a18868b4a4dd482292e5"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 12_119,
+                 sha256: "00e6c57defa6d55421c935973755958c3d479fb26d45b4de285dfea25373ea2b"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 14_429_952,
+                 sha256: "96f990461a5986d5e7309ad1a0f36084fbf0f4b28aec35948f8b8d0dcbf8599e"),
+            File(path: "Predictor.mlpackage/Manifest.json", size: 617,
+                 sha256: "9712c081cb64c445aa13a8dfeb0b0e988b2a1264c34ca0d74697c43f4ef7e397"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 88_752,
+                 sha256: "1f6eee5b7b1db05a54a766e7a2f950848d491260b1868a3ff882057ea842e014"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 12_356_416,
+                 sha256: "e3a36a729352a6f36f19fe2eec354f456e66fcd42d6aaefadfc83b739b3f2e45"),
+            File(path: "Preprocessor.mlpackage/Manifest.json", size: 617,
+                 sha256: "ae80310bd602296dbe1b2e108f5970128566f8d200a3c7f3c29e4a6e6f5be724"),
+            File(path: "RnntDecoder.bin", size: 35_772_420,
+                 sha256: "95b0591f0643ff94f3ed1a43ba4f8917abbfa4f10a9272b983502a60ece64851"),
+            File(path: "config.json", size: 4_756,
+                 sha256: "dd54d7d5586e1595f9e1e672c8f5cc097cbf621f7517bc776635b06286d78e97"),
+            File(path: "vocab.json", size: 10_055,
+                 sha256: "8e71323640de5f3be9a7fd7a306231ed3fd3dc654c59afb95cc2d0fabc2003e4"),
+        ])
+
+    /// Parakeet Unified EN 0.6B with a weight-only INT8 encoder (FP16 compute): the same accuracy as
+    /// `.parakeetUnifiedEn` in every published evaluation, about half the download and faster on the Neural Engine.
+    public static let parakeetUnifiedEnInt8 = AsrModel(
+        id: "parakeet-unified-en-0.6b-int8",
+        repository: "BuilderHelm/Parakeet-Unified-EN-0.6B-CoreML",
+        version: "1.0.0",
+        revision: "97e349c3dee2a9f683a435aac1157374a465d613",
+        architecture: .parakeetUnifiedEn,
+        supportedLanguages: ["en"],
+        capabilities: .parakeetUnifiedRnnt, ctcConfiguration: nil,
+        files: [
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 3_333_384,
+                 sha256: "a225e90ab390883b382665a5e9304055d3a262573d2f60b7513601a232c2b46d",
+                 repositoryPath: "variants/int8/Encoder.mlpackage/Data/com.apple.CoreML/model.mlmodel"),
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 635_155_882,
+                 sha256: "1bb65108e67898c13737b9485df2c2afc35516d0904b9a293a1cc43e2a7520fd",
+                 repositoryPath: "variants/int8/Encoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin"),
+            File(path: "Encoder.mlpackage/Manifest.json", size: 617,
+                 sha256: "f4a733e57cdb515cb34fdb0c557848b7fdae0383e119e099c5dafc15b194bd5d",
+                 repositoryPath: "variants/int8/Encoder.mlpackage/Manifest.json"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 4_722,
+                 sha256: "cc5d61412ce04db6d6266598689049c1c45d3401509ec2a5f2b56c546ace6191"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 3_446_978,
+                 sha256: "06831afa6d1beb0c0b10350ebf7886bc37638e951d14e738d7e06fbd2a05012f"),
+            File(path: "Joint.mlpackage/Manifest.json", size: 617,
+                 sha256: "8c4ef577c0bc99e629664e37bf449284c08b6497a2d2a18868b4a4dd482292e5"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 12_119,
+                 sha256: "00e6c57defa6d55421c935973755958c3d479fb26d45b4de285dfea25373ea2b"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 14_429_952,
+                 sha256: "96f990461a5986d5e7309ad1a0f36084fbf0f4b28aec35948f8b8d0dcbf8599e"),
+            File(path: "Predictor.mlpackage/Manifest.json", size: 617,
+                 sha256: "9712c081cb64c445aa13a8dfeb0b0e988b2a1264c34ca0d74697c43f4ef7e397"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 88_752,
+                 sha256: "1f6eee5b7b1db05a54a766e7a2f950848d491260b1868a3ff882057ea842e014"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 12_356_416,
+                 sha256: "e3a36a729352a6f36f19fe2eec354f456e66fcd42d6aaefadfc83b739b3f2e45"),
+            File(path: "Preprocessor.mlpackage/Manifest.json", size: 617,
+                 sha256: "ae80310bd602296dbe1b2e108f5970128566f8d200a3c7f3c29e4a6e6f5be724"),
+            File(path: "RnntDecoder.bin", size: 35_772_420,
+                 sha256: "95b0591f0643ff94f3ed1a43ba4f8917abbfa4f10a9272b983502a60ece64851"),
+            File(path: "config.json", size: 4_367,
+                 sha256: "37865273f6a7261d69c7475d13370407d6cecb9ce2d3c3a82a9923f8828cf970",
+                 repositoryPath: "variants/int8/config.json"),
+            File(path: "vocab.json", size: 10_055,
+                 sha256: "8e71323640de5f3be9a7fd7a306231ed3fd3dc654c59afb95cc2d0fabc2003e4"),
+        ],
+        variant: "int8")
+
     /// Locally managed Parakeet Unified EN 0.6B exports (offline mode, FP16 or the INT8-encoder variant
     /// folder). Use `SpeechRecognizer(directory:model:)`. English RNN-T text with token and word timestamps.
     public static let experimentalParakeetUnifiedEn = AsrModel(
@@ -189,7 +287,7 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
         architecture: .parakeetUnifiedEn, supportedLanguages: ["en"],
         capabilities: .parakeetUnifiedRnnt, ctcConfiguration: nil, files: [])
 
-    public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M, .parakeetTdtV3]
+    public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M, .parakeetTdtV3, .parakeetUnifiedEn, .parakeetUnifiedEnInt8]
     /// Descriptors for model folders you manage yourself, by id.
     public static let local: [AsrModel] = [.experimentalParakeetV3, .experimentalParakeetUnifiedEn]
 

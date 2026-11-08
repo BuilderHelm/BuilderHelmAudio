@@ -111,3 +111,25 @@ private let unifiedDirectory = ProcessInfo.processInfo.environment["BUILDERHELM_
     }
     #expect(try error(for: [["samples": 240000, "function": "w15"], ["samples": 480000, "function": "long"]]).contains("window functions"))
 }
+
+@Test func publishedUnifiedDescriptorsPinOneRepositoryWithIndependentVariants() throws {
+    let fp16 = AsrModel.parakeetUnifiedEn, int8 = AsrModel.parakeetUnifiedEnInt8
+    for model in [fp16, int8] {
+        #expect(AsrModel.all.contains(model) && AsrModel.named(model.id) == model)
+        #expect(model.repository == "BuilderHelm/Parakeet-Unified-EN-0.6B-CoreML" && model.revision.count == 40)
+        #expect(try RuntimeSelection.resolve(model: model, mode: .tdt).capabilities == [.rnnt, .tokenTimestamps, .wordTimestamps])
+        #expect(Set(model.files.map(\.path)).count == model.files.count && model.files.contains { $0.path == "config.json" })
+        #expect(model.files.contains { $0.path == "RnntDecoder.bin" } && model.files.allSatisfy { $0.sha256.count == 64 })
+    }
+    #expect(fp16.revision == int8.revision && fp16.variant == nil && int8.variant == "int8")
+    #expect(fp16.files.contains { $0.path.hasPrefix("EncoderTail.mlpackage/") })
+    #expect(!int8.files.contains { $0.path.hasPrefix("EncoderTail.mlpackage/") })
+    // The INT8 config and encoder come from variants/int8; shared packages keep their root paths.
+    for file in int8.files {
+        let fromVariant = file.path == "config.json" || file.path.hasPrefix("Encoder.mlpackage/")
+        #expect(file.repositoryPath == (fromVariant ? "variants/int8/" + file.path : file.path), "\(file.path)")
+    }
+    #expect((1_300_000_000...1_400_000_000).contains(fp16.totalBytes) && (650_000_000...750_000_000).contains(int8.totalBytes))
+    let store = ModelStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    #expect(store.directory(for: fp16) != store.directory(for: int8))
+}

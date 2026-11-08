@@ -11,6 +11,7 @@ usage: bhaudio <command> [options]
   benchmark <cases.json> [--model M] [--ctc] [--compute ane|gpu|cpu] [--rounds N] [--out results.json]
 
 Models: \(AsrModel.all.map(\.id).joined(separator: ", ")) (default \(AsrModel.parakeetTdtCtc110M.id))
+Local folders (transcribe, benchmark): --model-dir <folder> --model \(AsrModel.local.map(\.id).joined(separator: "|"))
 benchmark cases: a JSON array of {"path": "...", "text": "reference (optional)"}
 """
 
@@ -35,9 +36,13 @@ var arguments = Array(CommandLine.arguments.dropFirst())
     return true
 }
 
+/// A local folder from --model-dir, read before --model so the id can name a local descriptor.
+var modelDirectory: URL?
 @MainActor func model() -> AsrModel {
+    modelDirectory = option("--model-dir").map { URL(fileURLWithPath: $0, isDirectory: true) }
     let id = option("--model") ?? AsrModel.parakeetTdtCtc110M.id
-    guard let model = AsrModel.named(id) else { fail("Unknown model \(id). \(usage)") }
+    let known = modelDirectory == nil ? AsrModel.all : AsrModel.all + AsrModel.local
+    guard let model = known.first(where: { $0.id == id }) else { fail("Unknown model \(id). \(usage)") }
     return model
 }
 
@@ -62,12 +67,19 @@ func progressPrinter(_ model: AsrModel) -> @Sendable (DownloadProgress) -> Void 
     }
 }
 
-func load(_ model: AsrModel, ctc: Bool, compute: ComputeUnits = .neuralEngine) async throws -> SpeechRecognizer {
+@MainActor func load(_ model: AsrModel, ctc: Bool, compute: ComputeUnits = .neuralEngine) async throws -> SpeechRecognizer {
     let started = Date()
-    let recognizer = try await SpeechRecognizer.load(model, mode: ctc ? .ctc : .tdt, computeUnits: compute,
+    let recognizer: SpeechRecognizer
+    if let directory = modelDirectory {
+        recognizer = try SpeechRecognizer(directory: directory, model: model, mode: ctc ? .ctc : .tdt, computeUnits: compute,
+                                          compiledModelsDirectory: ModelStore.shared.compiledModelsDirectory)
+    } else {
+        recognizer = try await SpeechRecognizer.load(model, mode: ctc ? .ctc : .tdt, computeUnits: compute,
                                                      progress: progressPrinter(model))
+    }
+    let decoder = recognizer.mode == .ctc ? "CTC" : recognizer.capabilities.contains(.rnnt) ? "RNN-T" : "TDT"
     FileHandle.standardError.write(Data(String(format: "Loaded %@ (%@ mode) in %.2f s\n", model.description,
-                                               recognizer.mode == .ctc ? "CTC" : "TDT", Date().timeIntervalSince(started)).utf8))
+                                               decoder, Date().timeIntervalSince(started)).utf8))
     return recognizer
 }
 

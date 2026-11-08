@@ -167,7 +167,16 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
         supportedLanguages: ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
         capabilities: .parakeetV3Tdt, ctcConfiguration: nil, files: [])
 
+    /// Locally managed Parakeet Unified EN 0.6B exports (offline mode, FP16 or the INT8-encoder variant
+    /// folder). Use `SpeechRecognizer(directory:model:)`. English RNN-T text with token and word timestamps.
+    public static let experimentalParakeetUnifiedEn = AsrModel(
+        id: "parakeet-unified-en-0.6b-local", repository: "", version: "experimental", revision: "",
+        architecture: .parakeetUnifiedEn, supportedLanguages: ["en"],
+        capabilities: .parakeetUnifiedRnnt, ctcConfiguration: nil, files: [])
+
     public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M, .parakeetTdtV3]
+    /// Descriptors for model folders you manage yourself, by id.
+    public static let local: [AsrModel] = [.experimentalParakeetV3, .experimentalParakeetUnifiedEn]
 
     public static func named(_ id: String) -> AsrModel? { all.first { $0.id == id } }
 }

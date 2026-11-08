@@ -3,16 +3,17 @@ import CryptoKit
 import Foundation
 import Darwin
 
-/// Offline v3 runtime with bounded windows. Serialize calls on each instance.
-/// Each token carries NeMo's TDT timing (emission frame and predicted duration, 80 ms frames)
-/// and `max_prob` confidence, from which `words(_:)` builds word timestamps.
+/// Offline runtime for the 0.6B Parakeet transducers with bounded windows: TDT v3 and the RNN-T
+/// Parakeet Unified EN (offline mode), selected by `config.json`. Serialize calls on each instance.
+/// Each token carries NeMo's timing (emission frame and duration, 80 ms frames; RNN-T tokens span
+/// one frame) and `max_prob` confidence, from which `words(_:)` builds word timestamps.
 public final class ParakeetTdtV3 {
     public struct Result {
         public let text: String
         public let tokenIDs: [Int]
         /// Encoder frame (80 ms) at which each token was emitted, from the start of the audio.
         public let emissionFrames: [Int]
-        /// Frames each token covers: the TDT duration predicted with it (0...4).
+        /// Frames each token covers: the TDT duration predicted with it (0...4), or 1 for RNN-T.
         public let durations: [Int]
         /// NeMo `max_prob` confidence of each token, (N·p − 1)/(N − 1) over tokens and blank.
         public let confidences: [Float]
@@ -54,12 +55,15 @@ public final class ParakeetTdtV3 {
     }
     struct Config: Decodable {
         let architecture: String
+        /// "rnnt" for Parakeet Unified; absent (TDT) for v3.
+        let decoder: String?
         let precision: String
         let sample_rate: Int
         let window_samples: Int
         let blank_id: Int
         let vocabulary_size: Int
-        let durations: [Int]
+        /// TDT duration classes; absent for RNN-T.
+        let durations: [Int]?
         let max_symbols: Int
         let punctuation: [String]
         let files: [String: String]
@@ -67,8 +71,37 @@ public final class ParakeetTdtV3 {
         let encoder_stages: [String]?
         let staged_preprocessor: Bool?
     }
+
+    /// Joint layout and step rule of one supported model.
+    struct Contract: Equatable {
+        let architecture: String
+        let blank: Int
+        /// TDT duration classes after the token logits; empty for RNN-T.
+        let durations: [Int]
+        var isRNNT: Bool { durations.isEmpty }
+        /// Token logits including blank, then one logit per duration class.
+        var logitCount: Int { blank + 1 + durations.count }
+
+        static let v3 = Contract(architecture: "parakeet-tdt-0.6b-v3", blank: 8192, durations: [0, 1, 2, 3, 4])
+        static let unifiedEn = Contract(architecture: "parakeet-unified-en-0.6b", blank: 1024, durations: [])
+
+        static func resolve(_ config: Config) -> Contract? {
+            let contract: Contract
+            switch (config.architecture, config.decoder) {
+            case (Self.v3.architecture, nil), (Self.v3.architecture, "tdt"): contract = .v3
+            case (Self.unifiedEn.architecture, "rnnt"): contract = .unifiedEn
+            default: return nil
+            }
+            guard config.blank_id == contract.blank, config.vocabulary_size == contract.blank,
+                  (config.durations ?? []) == contract.durations else { return nil }
+            return contract
+        }
+    }
     private let allowExperimentalLongAudio: Bool
     private let config: Config
+    let contract: Contract
+    /// True for Parakeet Unified's RNN-T contract, false for TDT v3.
+    public var decodesRNNT: Bool { contract.isRNNT }
     private let pieces: [String]
     private var wordPunctuation: Set<String> = []
     private let predictor: MLModel, joint: MLModel
@@ -138,10 +171,10 @@ public final class ParakeetTdtV3 {
         self.encoderComputeUnits = computeUnits
         let decoder = JSONDecoder()
         config = try decoder.decode(Config.self, from: Data(contentsOf: directory.appendingPathComponent("config.json")))
-        guard config.architecture == "parakeet-tdt-0.6b-v3", ["fp32", "fp16"].contains(config.precision),
-              config.sample_rate == 16000, config.window_samples == 240000, config.blank_id == 8192,
-              config.vocabulary_size == 8192, config.durations == [0, 1, 2, 3, 4], config.max_symbols == 10
+        guard let contract = Contract.resolve(config), ["fp32", "fp16"].contains(config.precision),
+              config.sample_rate == 16000, config.window_samples == 240000, config.max_symbols == 10
         else { throw ParakeetError.badConfig("Unsupported v3 tensor/decoder contract") }
+        self.contract = contract
         if let windows = config.windows {
             guard windows.map(\.samples) == [240000,480000], windows.map(\.function) == ["w15","w30"] else {
                 throw ParakeetError.badConfig("Expected ordered w15/w30 window functions")
@@ -162,7 +195,9 @@ public final class ParakeetTdtV3 {
         let manifest = config.files
         try Self.verify(manifest, in: directory, cache: cacheDirectory)
         pieces = try decoder.decode([String].self, from: Data(contentsOf: directory.appendingPathComponent("vocab.json")))
-        guard pieces.count == 8192, pieces.first == "<unk>" else { throw ParakeetError.badConfig("Expected 8192 tokenizer pieces") }
+        guard pieces.count == contract.blank, pieces.first == "<unk>" else {
+            throw ParakeetError.badConfig("Expected \(contract.blank) tokenizer pieces")
+        }
         wordPunctuation = ParakeetWords.punctuation(in: pieces)
         func load(_ name: String, _ units: MLComputeUnits) throws -> MLModel {
             try autoreleasepool {
@@ -193,7 +228,7 @@ public final class ParakeetTdtV3 {
         decoderStep = try Self.array([1, 640, 1]); encoderStep = try Self.array([1, 1024, 1])
         _ = try windowModels()
         try Self.validate(predictor, inputs: ["targets": [1,1], "h_in": [2,1,640], "c_in": [2,1,640]], outputs: ["decoder": [1,640,1], "h_out": [2,1,640], "c_out": [2,1,640]])
-        try Self.validate(joint, inputs: ["encoder_step": [1,1024,1], "decoder_step": [1,640,1]], outputs: ["logits": [1,1,1,8198]])
+        try Self.validate(joint, inputs: ["encoder_step": [1,1024,1], "decoder_step": [1,640,1]], outputs: ["logits": [1,1,1,contract.logitCount]])
     }
 
     /// Checks every manifest file against its SHA-256. A passing check is recorded in the cache with
@@ -630,7 +665,8 @@ public final class ParakeetTdtV3 {
         Self.zero(hidden); Self.zero(cell)
         let (features, frames) = try encode(samples, checkCancellation: checkCancellation)
         diagnose("encoder", features)
-        var time = 0, symbols = 0, lastToken = 8192, needsPrediction = true
+        let blank = contract.blank, logitCount = contract.logitCount
+        var time = 0, symbols = 0, lastToken = blank, needsPrediction = true
         var ids: [Int] = [], times: [Int] = [], spans: [Int] = [], confidences: [Float] = []
         while time < frames {
             try checkCancellation()
@@ -662,19 +698,23 @@ public final class ParakeetTdtV3 {
                 let input = try Self.provider(["encoder_step": encoderStep, "decoder_step": decoderStep])
                 let output = try joint.prediction(from: input)
                 return try withExtendedLifetime((input, output)) {
-                    let logits = try Self.output(output, "logits", [1,1,1,8198])
+                    let logits = try Self.output(output, "logits", [1,1,1,logitCount])
                     diagnose("logits", logits)
-                    let token = try Self.argmax(logits, 0..<8193)
-                    let duration = config.durations[try Self.argmax(logits, 8193..<8198) - 8193]
+                    let token = try Self.argmax(logits, 0..<(blank + 1))
+                    // RNN-T stays on the frame after a token and advances one frame on blank.
+                    let duration = contract.isRNNT ? (token == blank ? 1 : 0)
+                        : contract.durations[try Self.argmax(logits, (blank + 1)..<logitCount) - blank - 1]
                     // Only emitted tokens need a confidence; blanks skip the softmax.
                     var confidence: Float = 0
-                    if token != 8192 { confidence = try Self.maxProbConfidence(logits, token: token, count: 8193) }
+                    if token != blank { confidence = try Self.maxProbConfidence(logits, token: token, count: blank + 1) }
                     return (token, duration, confidence)
                 }
             }
             diagnostics?("decision", [Float(time), Float(token), Float(duration)])
-            if token != 8192 {
-                ids.append(token); times.append(time); spans.append(duration); confidences.append(confidence); lastToken = token
+            if token != blank {
+                // NeMo gives an RNN-T token a one-frame span.
+                let span = contract.isRNNT ? 1 : duration
+                ids.append(token); times.append(time); spans.append(span); confidences.append(confidence); lastToken = token
                 try Self.copy(candidateHidden, into: hidden); try Self.copy(candidateCell, into: cell)
                 needsPrediction = true
             }
@@ -733,6 +773,7 @@ public final class ParakeetTdtV3 {
     /// normalization. Used for vocabulary-aware choices among close candidates, not plain transcription.
     public func alternatives(_ samples: [Float], beamSize: Int = 4, nbest: Int = 4, normalizeScores: Bool = true,
                              checkCancellation: () throws -> Void = {}) throws -> [Hypothesis] {
+        guard !contract.isRNNT else { throw ParakeetError.badConfig("Ranked alternatives require a TDT model") }
         guard (1...16).contains(beamSize), (1...beamSize).contains(nbest) else {
             throw ParakeetError.badConfig("Require 16 >= beam size >= n-best >= 1")
         }
@@ -816,7 +857,7 @@ public final class ParakeetTdtV3 {
 
     private func beamSearch(features: MLMultiArray, frames: Int, beam: Int, nbest: Int, normalize: Bool,
                             checkCancellation: () throws -> Void) throws -> [Hypothesis] {
-        let blank = 8192, durations = config.durations
+        let blank = 8192, durations = contract.durations
         let tokenBeam = min(beam, blank - 1), durationBeam = min(beam, durations.count)
         let zeroDuration = durations.firstIndex(of: 0)
         guard features.dataType == .float32 else { throw ParakeetError.badConfig("Expected float32 encoder output") }
@@ -922,7 +963,7 @@ public final class ParakeetTdtV3 {
 
     /// Word timestamps and confidences for a result from this model.
     public func words(_ result: Result) -> [ParakeetWord] {
-        ParakeetWords.group(result, pieces: pieces, punctuation: wordPunctuation)
+        ParakeetWords.group(result, pieces: pieces, punctuation: wordPunctuation, refinePunctuation: !contract.isRNNT)
     }
 
     /// The tokenizer piece for an id, or "" when out of range.

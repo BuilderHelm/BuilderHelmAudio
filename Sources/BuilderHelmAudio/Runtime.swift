@@ -82,6 +82,13 @@ struct RuntimeSelection: Sendable {
             }
             return Self(architecture: .parakeetV3, mode: .tdt, capabilities: .parakeetV3Tdt, ctcConfiguration: nil)
         }
+        if architecture == .parakeetUnifiedEn {
+            guard mode == .tdt, metadata.capabilities == .parakeetUnifiedRnnt, metadata.ctcConfiguration == nil,
+                  metadata.supportedLanguages == ["en"] else {
+                throw BuilderHelmAudioError.invalidModelConfiguration("Parakeet Unified supports English RNN-T text with token and word timestamps; CTC is unavailable")
+            }
+            return Self(architecture: .parakeetUnifiedEn, mode: .tdt, capabilities: .parakeetUnifiedRnnt, ctcConfiguration: nil)
+        }
         guard architecture == .parakeet110M else {
             throw BuilderHelmAudioError.unsupportedArchitecture(architecture.rawValue)
         }
@@ -105,6 +112,9 @@ enum RuntimeFactory {
         switch selection.architecture {
         case .parakeetV3:
             return try ParakeetV3Runtime(directory: directory, computeUnits: computeUnits.coreML, cache: cache)
+        case .parakeetUnifiedEn:
+            return try ParakeetV3Runtime(directory: directory, computeUnits: computeUnits.coreML, cache: cache,
+                                         capabilities: .parakeetUnifiedRnnt)
         case .parakeet110M:
             return try Parakeet110MRuntime(directory: directory, selection: selection,
                                           computeUnits: computeUnits.coreML, cache: cache)

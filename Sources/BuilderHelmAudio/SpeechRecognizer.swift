@@ -104,7 +104,7 @@ public final class SpeechRecognizer: @unchecked Sendable {
                             progress: (@Sendable (DownloadProgress) -> Void)? = nil) async throws -> SpeechRecognizer {
         try Task.checkCancellation()
         guard !model.repository.isEmpty else {
-            throw BuilderHelmAudioError.invalidModelConfiguration("Experimental v3 is local-only; use SpeechRecognizer(directory:model:)")
+            throw BuilderHelmAudioError.invalidModelConfiguration("Experimental models are local-only; use SpeechRecognizer(directory:model:)")
         }
         _ = try RuntimeSelection.resolve(model: model, mode: mode)
         let directory = try await store.download(model, progress: progress)

@@ -8,6 +8,9 @@ public struct AsrArchitecture: RawRepresentable, Hashable, Sendable {
 
     public static let parakeetV3 = Self(rawValue: "parakeet-tdt-0.6b-v3")
 
+    /// Parakeet Unified EN 0.6B in offline mode: RNN-T decoding on the v3 runtime.
+    public static let parakeetUnifiedEn = Self(rawValue: "parakeet-unified-en-0.6b")
+
     public static let parakeet110M = Self(rawValue: "parakeet-tdt-ctc-110m")
 }
 
@@ -24,10 +27,13 @@ public struct AsrCapabilities: OptionSet, Hashable, Sendable {
     public static let keywordSpotting = Self(rawValue: 1 << 5)
     /// Ranked TDT beam-search alternatives (`SpeechRecognizer.alternatives`).
     public static let rankedAlternatives = Self(rawValue: 1 << 6)
+    /// RNN-T transcript (selected with `DecodingMode.tdt`, the transducer mode).
+    public static let rnnt = Self(rawValue: 1 << 7)
 
     static let parakeet110MTdt: Self = [.tdt, .ctc, .tokenTimestamps, .keywordSpotting]
     static let parakeet110MCtc: Self = [.ctc, .keywordSpotting]
     static let parakeetV3Tdt: Self = [.tdt, .tokenTimestamps, .wordTimestamps, .rankedAlternatives]
+    static let parakeetUnifiedRnnt: Self = [.rnnt, .tokenTimestamps, .wordTimestamps]
 }
 
 /// Layout of one model's CTC frames. Vocabulary pieces omit the blank class.

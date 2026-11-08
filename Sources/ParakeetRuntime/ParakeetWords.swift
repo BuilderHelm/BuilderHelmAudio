@@ -30,7 +30,9 @@ public enum ParakeetWords {
         return found
     }
 
-    public static func group(_ result: ParakeetTdtV3.Result, pieces: [String], punctuation: Set<String>) -> [ParakeetWord] {
+    /// `refinePunctuation` applies NeMo's TDT refinement; NeMo leaves RNN-T timestamps unrefined.
+    public static func group(_ result: ParakeetTdtV3.Result, pieces: [String], punctuation: Set<String>,
+                             refinePunctuation: Bool = true) -> [ParakeetWord] {
         let n = result.tokenIDs.count
         guard n > 0, result.emissionFrames.count == n, result.durations.count == n, result.confidences.count == n else { return [] }
         let delimiter = " "
@@ -42,7 +44,7 @@ public enum ParakeetWords {
         func isPunctuation(_ value: String) -> Bool { !value.isEmpty && value != delimiter && punctuation.contains(value) }
 
         // TDT refinement: a token that begins with punctuation is pinned to the previous token's end.
-        for i in 1..<max(1, n) where !text[i].isEmpty && isPunctuation(String(text[i].first!)) {
+        for i in 1..<max(1, n) where refinePunctuation && !text[i].isEmpty && isPunctuation(String(text[i].first!)) {
             start[i] = end[i - 1]
             end[i] = start[i]
         }

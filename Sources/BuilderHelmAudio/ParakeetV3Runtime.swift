@@ -2,14 +2,20 @@ import CoreML
 import Foundation
 import ParakeetRuntime
 
+/// The 0.6B transducer runtime: TDT v3, or RNN-T Parakeet Unified when its config says so.
 final class ParakeetV3Runtime: AsrRuntime {
     let mode: DecodingMode = .tdt
-    let capabilities: AsrCapabilities = .parakeetV3Tdt
+    let capabilities: AsrCapabilities
     let keywordSpotter: KeywordSpotter? = nil
     let model: ParakeetTdtV3
-    init(directory: URL, computeUnits: MLComputeUnits, cache: URL) throws {
+    init(directory: URL, computeUnits: MLComputeUnits, cache: URL, capabilities: AsrCapabilities = .parakeetV3Tdt) throws {
         model = try ParakeetTdtV3(directory: directory, computeUnits: computeUnits, cacheDirectory: cache,
                                  decoderComputeUnits: .cpuOnly)
+        // The folder's config decides the decoder; it must be the one the descriptor promised.
+        guard model.decodesRNNT == capabilities.contains(.rnnt) else {
+            throw BuilderHelmAudioError.invalidModelConfiguration("The model folder's decoder does not match the selected model")
+        }
+        self.capabilities = capabilities
     }
     func transcribe(file: URL, request: RuntimeRequest) throws -> RuntimeResult {
         try convert(model.transcribe(file: file, checkCancellation: request.cancellation.check))

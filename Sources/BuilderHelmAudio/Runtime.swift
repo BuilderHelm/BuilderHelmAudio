@@ -77,7 +77,9 @@ struct RuntimeSelection: Sendable {
         let architecture = metadata.architecture
         if architecture == .parakeetV3 {
             guard mode == .tdt, metadata.capabilities == .parakeetV3Tdt, metadata.ctcConfiguration == nil,
-                  Set(metadata.supportedLanguages) == Set(AsrModel.experimentalParakeetV3.supportedLanguages) else {
+                  !metadata.supportedLanguages.isEmpty,
+                  // Fine-tuned v3 models may advertise fewer languages (Cadence Sae is English only), never others.
+                  Set(metadata.supportedLanguages).isSubset(of: AsrModel.experimentalParakeetV3.supportedLanguages) else {
                 throw BuilderHelmAudioError.invalidModelConfiguration("V3 supports TDT text with token and word timestamps; CTC is unavailable")
             }
             return Self(architecture: .parakeetV3, mode: .tdt, capabilities: .parakeetV3Tdt, ctcConfiguration: nil)

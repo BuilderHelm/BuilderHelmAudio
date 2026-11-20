@@ -81,10 +81,11 @@ print(transcript.text)
 | **`.parakeetTdtCtc110M`** | Transcription with token times | TDT text + token times, CTC text | 144 MB | [Parakeet-TDT-CTC-110M-CoreML](https://huggingface.co/BuilderHelm/Parakeet-TDT-CTC-110M-CoreML) |
 | **`.parakeetCtc110M`** | Fastest transcription, keyword spotting | CTC text | 124 MB | [Parakeet-CTC-110M-CoreML](https://huggingface.co/BuilderHelm/Parakeet-CTC-110M-CoreML) |
 | **`.parakeetTdtV3`** | Transcription in 25 languages | TDT text | 1.27 GB | [Parakeet-TDT-0.6B-V3-CoreML](https://huggingface.co/BuilderHelm/Parakeet-TDT-0.6B-V3-CoreML) |
+| **`.cadenceSaeEn`** | English dictation, accented and Indian English | TDT text + token and word times | 0.54 GB | [Cadence-Sae-EN](https://huggingface.co/BuilderHelm/Cadence-Sae-EN) |
 | **`.parakeetUnifiedEnInt8`** | English dictation with punctuation | RNN-T text + token and word times | 0.71 GB | [Parakeet-Unified-EN-0.6B-CoreML](https://huggingface.co/BuilderHelm/Parakeet-Unified-EN-0.6B-CoreML) |
 | **`.parakeetUnifiedEn`** | The same, unquantized FP16 encoder | RNN-T text + token and word times | 1.34 GB | [Parakeet-Unified-EN-0.6B-CoreML](https://huggingface.co/BuilderHelm/Parakeet-Unified-EN-0.6B-CoreML) |
 
-The two 110M models are English-only conversions of NVIDIA's [Parakeet-TDT-CTC-110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m) with INT8 encoders. V3 converts [Parakeet-TDT-0.6B-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) with unquantized FP16 weights; evaluated INT8/INT4 candidates failed the language accuracy gates. Parakeet Unified converts [parakeet-unified-en-0.6b](https://huggingface.co/nvidia/parakeet-unified-en-0.6b) (offline mode) in two downloads from one repository: an unquantized FP16 encoder, and a weight-only INT8 encoder with the same accuracy. Each descriptor pins an immutable Hugging Face commit and every file's SHA-256.
+The two 110M models are English-only conversions of NVIDIA's [Parakeet-TDT-CTC-110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m) with INT8 encoders. V3 converts [Parakeet-TDT-0.6B-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) with unquantized FP16 weights; evaluated INT8/INT4 candidates failed the language accuracy gates. Parakeet Unified converts [parakeet-unified-en-0.6b](https://huggingface.co/nvidia/parakeet-unified-en-0.6b) (offline mode) in two downloads from one repository: an unquantized FP16 encoder, and a weight-only INT8 encoder with the same accuracy. Cadence Sae is BuilderHelm's English fine-tune of V3 (top 8 encoder layers, predictor and joint, trained on accented English and meeting speech) with a 6-bit palettized encoder; it runs on the V3 runtime. Each descriptor pins an immutable Hugging Face commit and every file's SHA-256.
 
 ---
 
@@ -147,6 +148,17 @@ V3 automatically recognizes Bulgarian, Croatian, Czech, Danish, Dutch, English, 
 Offline recordings have no fixed duration limit. Short requests use a 15-second function; longer requests use a shared-weight 30-second function, with quiet-pause cuts and overlap token matching. Reuse one recognizer: the first request at a different window size may incur preparation cost. V3 returns text, token times and `words` (start, end and confidence, NeMo-compatible), with `ctcTranscript == nil`. `alternatives(samples:beamSize:nbest:)` returns ranked beam-search candidates for recordings of at most 30 s. CTC probabilities, keyword spotting, segment timestamps and live partial results are unavailable.
 
 The Neural Engine compiles each V3 window the first time an app loads it on a macOS build, which takes about 20 s. Call `prepare()` once after loading (for example during setup) so the first recording does not wait for it. Later loads take about 0.1 s: files verified once are not re-hashed until they change. See [V3 validation and limitations](Documentation/ParakeetV3.md).
+
+### English in a smaller download: Cadence Sae
+
+```swift
+let recognizer = try await SpeechRecognizer.load(.cadenceSaeEn)
+try await recognizer.prepare()
+let transcript = try await recognizer.transcribe(file: audioURL)
+print(transcript.text)
+```
+
+Cadence Sae uses the V3 runtime, windows and API: text, token times, `words` and ranked alternatives, with no CTC. It is English only and a 0.54 GB download, 43% of V3's. On ZenVoice Speech Bench v1 (M5) it scores 7.5% WER at 147× real time with a typical delay of 0.05 s, level with V3 overall and better on meetings. On iPhone 13 it runs about 40× real time. See [Cadence Sae](Documentation/CadenceSae.md).
 
 ### English with punctuation: Parakeet Unified
 
@@ -409,7 +421,7 @@ BuilderHelmAudio/
 
 ## Status
 
-Version 0.4.0 adds Parakeet Unified EN (FP16 and INT8 encoder downloads, RNN-T decoding, a five-window ladder, CPU decoding and resident windows on macOS) and independent model variants. Version 0.3.0 added V3 token and word timestamps with confidences, ranked alternatives, `prepare()` and faster repeat loads. Version 0.2.0 added the multilingual V3 FP16 model, long-recording joins, runtime selection, cancellation and capability-aware APIs. Physical validation uses an Apple M5 Mac (macOS 27.2) and iPhone 13 (iOS 27.2). The compatibility target is all Apple Silicon Macs, M1 onward, with macOS 15+, and iOS 18+. See [V3 validation](Documentation/ParakeetV3.md) for accuracy, quantization decisions, sustained testing and coverage limits.
+Version 0.4.1 adds Cadence Sae (`.cadenceSaeEn`), an English V3 fine-tune with a 6-bit encoder, and lets V3-architecture models advertise a subset of V3's languages. Version 0.4.0 added Parakeet Unified EN (FP16 and INT8 encoder downloads, RNN-T decoding, a five-window ladder, CPU decoding and resident windows on macOS) and independent model variants. Version 0.3.0 added V3 token and word timestamps with confidences, ranked alternatives, `prepare()` and faster repeat loads. Version 0.2.0 added the multilingual V3 FP16 model, long-recording joins, runtime selection, cancellation and capability-aware APIs. Physical validation uses an Apple M5 Mac (macOS 27.2) and iPhone 13 (iOS 27.2). The compatibility target is all Apple Silicon Macs, M1 onward, with macOS 15+, and iOS 18+. See [V3 validation](Documentation/ParakeetV3.md) for accuracy, quantization decisions, sustained testing and coverage limits.
 
 Voice activity detection, live partial transcription, V3 segment timestamps, subtitles, diarization, speech synthesis, noise suppression and echo cancellation are separate future work.
 

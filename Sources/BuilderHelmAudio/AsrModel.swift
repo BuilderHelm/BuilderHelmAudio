@@ -174,6 +174,79 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
                  sha256: "6d23d30bfea120aaf0b911a3e2f66a72b011d0722554550b0bce821e1bd6409b"),
         ])
 
+    /// Cadence Sae (English): Parakeet TDT 0.6B v3 with its top 8 encoder layers, predictor and joint fine-tuned
+    /// on accented English and meeting speech, encoder weights 6-bit palettized. English TDT text with token and
+    /// word timestamps; same runtime, windows and capabilities as `.parakeetTdtV3`. No CTC.
+    /// The repository also holds FP16, 4-bit and mixed builds; this descriptor pins the 6-bit folder.
+    public static let cadenceSaeEn = AsrModel(
+        id: "cadence-sae-en",
+        repository: "BuilderHelm/Cadence-Sae-EN",
+        version: "1.0.0",
+        revision: "4702453cd0c6f922b1480857223371db53aa6d40",
+        architecture: .parakeetV3,
+        supportedLanguages: ["en"],
+        capabilities: .parakeetV3Tdt, ctcConfiguration: nil,
+        files: [
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 621_181,
+                 sha256: "9f28e452a093756272e0ae9177f5fa9213372cb57aee2ed2d0b3dd25168087a9",
+                 repositoryPath: "coreml/6bit/Encoder.mlpackage/Data/com.apple.CoreML/model.mlmodel"),
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 250_213_696,
+                 sha256: "4349fdacba055f9666939541ae05831df5ddfd8bfdcb9c8dfa88b4d01d2d6404",
+                 repositoryPath: "coreml/6bit/Encoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin"),
+            File(path: "Encoder.mlpackage/Manifest.json", size: 617,
+                 sha256: "1edef987af8faf263b886966a1cbe845790361a31c2f4af23c50d9e8dcb6281f",
+                 repositoryPath: "coreml/6bit/Encoder.mlpackage/Manifest.json"),
+            File(path: "EncoderTail.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 595_432,
+                 sha256: "81afb64f9b8e106be5313d3f3625805e3a67c1a83b8959e90dcac214121e73cd",
+                 repositoryPath: "coreml/6bit/EncoderTail.mlpackage/Data/com.apple.CoreML/model.mlmodel"),
+            File(path: "EncoderTail.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 246_942_784,
+                 sha256: "3689d1b56a663a100cd7a3f03e5a73531702cba0c7239c27a5e83af5a3f67c76",
+                 repositoryPath: "coreml/6bit/EncoderTail.mlpackage/Data/com.apple.CoreML/weights/weight.bin"),
+            File(path: "EncoderTail.mlpackage/Manifest.json", size: 617,
+                 sha256: "79d85be086f84c933f98377380eb0c4513259c30d4f796d63c8d43fa176c8d1a",
+                 repositoryPath: "coreml/6bit/EncoderTail.mlpackage/Manifest.json"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 4_647,
+                 sha256: "ef71e774a9ca37347188276fccb0aa474481b77e5dcc3fe0faf8af9ba7283d73",
+                 repositoryPath: "coreml/6bit/Joint.mlpackage/Data/com.apple.CoreML/model.mlmodel"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 12_642_764,
+                 sha256: "a7795226a2c21f50680cbee042ff9452ed30c33027ec547ffc557abf9f144319",
+                 repositoryPath: "coreml/6bit/Joint.mlpackage/Data/com.apple.CoreML/weights/weight.bin"),
+            File(path: "Joint.mlpackage/Manifest.json", size: 617,
+                 sha256: "7148f2bcb95efee49f5710c4884c9ba49c76ee723f1d3292dbf96faf681141a2",
+                 repositoryPath: "coreml/6bit/Joint.mlpackage/Manifest.json"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 12_045,
+                 sha256: "a762164ff413495f702b6d770434319860cfab89d9f51158d6a0b65e1fa208b7",
+                 repositoryPath: "coreml/6bit/Predictor.mlpackage/Data/com.apple.CoreML/model.mlmodel"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 23_604_992,
+                 sha256: "9f74ceb8e28a6839bb1a8b77e75f2b1e4adce9a95769619a6c5a94bb33fa07e7",
+                 repositoryPath: "coreml/6bit/Predictor.mlpackage/Data/com.apple.CoreML/weights/weight.bin"),
+            File(path: "Predictor.mlpackage/Manifest.json", size: 617,
+                 sha256: "90e18803615868935c317c334202cb4390ee288f41c91578fd52550aeee40c60",
+                 repositoryPath: "coreml/6bit/Predictor.mlpackage/Manifest.json"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 37_760,
+                 sha256: "7a67f874be8af28a9a868415387d08df9df11762bedf270aa7c82d212312e964",
+                 repositoryPath: "coreml/6bit/Preprocessor.mlpackage/Data/com.apple.CoreML/model.mlmodel"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 7_348_032,
+                 sha256: "c7b165bbc95ac8538b0e3dc28e4f7a770dfa31e1cc9f754cb9055c211d224b21",
+                 repositoryPath: "coreml/6bit/Preprocessor.mlpackage/Data/com.apple.CoreML/weights/weight.bin"),
+            File(path: "Preprocessor.mlpackage/Manifest.json", size: 617,
+                 sha256: "ed2bd2f705935ab4db0cc5cf51f85068fa675108426225891f74a1d6d602229c",
+                 repositoryPath: "coreml/6bit/Preprocessor.mlpackage/Manifest.json"),
+            File(path: "cadence-export.json", size: 822,
+                 sha256: "af82a167eb187306f0605580a6cc148061e86c734a178c20c098d014f5e6a66d",
+                 repositoryPath: "coreml/6bit/cadence-export.json"),
+            File(path: "config.json", size: 3_394,
+                 sha256: "f14da96cabcdd23e1f19543e895cd6b554eeff567bafe2d5edc0ddad6d2bce9f",
+                 repositoryPath: "coreml/6bit/config.json"),
+            File(path: "merge-record.json", size: 554,
+                 sha256: "79e69e9b695aa9972bdf43a9ca774c56ec5b299ce72f6e4784a85c02eccb8872",
+                 repositoryPath: "coreml/6bit/merge-record.json"),
+            File(path: "vocab.json", size: 95_041,
+                 sha256: "6d23d30bfea120aaf0b911a3e2f66a72b011d0722554550b0bce821e1bd6409b",
+                 repositoryPath: "coreml/6bit/vocab.json"),
+        ],
+        variant: "6bit")
+
     /// Locally managed v3 exports. Use `SpeechRecognizer(directory:model:)`.
     /// This descriptor has no remote repository and supports TDT text, token and word timestamps.
     public static let experimentalParakeetV3 = AsrModel(
@@ -287,7 +360,7 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
         architecture: .parakeetUnifiedEn, supportedLanguages: ["en"],
         capabilities: .parakeetUnifiedRnnt, ctcConfiguration: nil, files: [])
 
-    public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M, .parakeetTdtV3, .parakeetUnifiedEn, .parakeetUnifiedEnInt8]
+    public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M, .parakeetTdtV3, .cadenceSaeEn, .parakeetUnifiedEn, .parakeetUnifiedEnInt8]
     /// Descriptors for model folders you manage yourself, by id.
     public static let local: [AsrModel] = [.experimentalParakeetV3, .experimentalParakeetUnifiedEn]
 

@@ -9,7 +9,8 @@ import Testing
     #expect(model.architecture == .parakeetV3 && model.supportedLanguages == ["en"] && model.ctcConfiguration == nil)
     // Same runtime and capabilities as the multilingual v3 release.
     let selection = try RuntimeSelection.resolve(model: model, mode: .tdt)
-    #expect(selection.capabilities == (try RuntimeSelection.resolve(model: .parakeetTdtV3, mode: .tdt)).capabilities)
+    let multilingual = try RuntimeSelection.resolve(model: .parakeetTdtV3, mode: .tdt)
+    #expect(selection.capabilities == multilingual.capabilities)
     #expect(throws: BuilderHelmAudioError.self) { try RuntimeSelection.resolve(model: model, mode: .ctc) }
     // Every file the v3 runtime opens, plus the export records config.json pins, all from coreml/6bit/.
     #expect(model.files.count == 19 && Set(model.files.map(\.path)).count == 19)
@@ -26,8 +27,9 @@ import Testing
                  architecture: .parakeetV3, supportedLanguages: languages, capabilities: .parakeetV3Tdt,
                  ctcConfiguration: nil, files: [])
     }
-    #expect(try RuntimeSelection.resolve(model: v3(["en"]), mode: .tdt).architecture == .parakeetV3)
-    #expect(try RuntimeSelection.resolve(model: v3(["en", "de", "fr"]), mode: .tdt).architecture == .parakeetV3)
+    let english = try RuntimeSelection.resolve(model: v3(["en"]), mode: .tdt)
+    let european = try RuntimeSelection.resolve(model: v3(["en", "de", "fr"]), mode: .tdt)
+    #expect(english.architecture == .parakeetV3 && european.architecture == .parakeetV3)
     for languages in [[], ["hi"], ["en", "ja"]] {
         #expect(throws: BuilderHelmAudioError.self, "\(languages)") { try RuntimeSelection.resolve(model: v3(languages), mode: .tdt) }
     }

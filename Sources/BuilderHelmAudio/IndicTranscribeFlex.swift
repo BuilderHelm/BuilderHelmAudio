@@ -100,7 +100,12 @@ public actor IndicTranscribeFlex {
 
         let features = try Self.predict(frontend, ["audio": audio], output: "features")
         let states = try Self.predict(encoder, ["features": features], output: "encoder_states")
-        let selected = try language ?? detectLanguage(states)
+        let selected: String
+        if let language {
+            selected = language
+        } else {
+            selected = try detectLanguage(states)
+        }
         guard var ids = tokenizer.prompts[selected]?[mode.rawValue] else {
             throw InferenceError.unsupportedLanguage(selected)
         }

@@ -1,0 +1,8 @@
+coremltools==9.0
+huggingface-hub
+numpy
+sentencepiece
+soundfile
+torch==2.8.0
+torchaudio==2.8.0
+transformers==4.57.6

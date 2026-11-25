@@ -7,6 +7,7 @@ usage: bhaudio <command> [options]
   models                                   List models and whether they are downloaded
   download <model>                         Download and verify a model
   transcribe <audio>... [--model M] [--ctc] [--compute ane|gpu|cpu] [--json]  (--json: one line per file; --alternatives adds a 4-best beam ≤ 30 s)
+  indic-transcribe <audio>... --model-dir <flex-export> [--language CODE|auto] [--mode native|mixed|romanized] [--cached]
   spot <audio> <keyword>... [--model M] [--threshold T]
   benchmark <cases.json> [--model M] [--ctc] [--compute ane|gpu|cpu] [--rounds N] [--out results.json]
 
@@ -122,6 +123,20 @@ do {
         guard let id = arguments.first, let model = AsrModel.named(id) else { fail(usage) }
         let directory = try await ModelStore.shared.download(model, progress: progressPrinter(model))
         print(directory.path)
+    case "indic-transcribe":
+        guard let path = option("--model-dir") else { fail("indic-transcribe requires --model-dir") }
+        let language = option("--language") ?? "auto"
+        let cached = flag("--cached")
+        guard let mode = IndicTranscribeFlex.OutputMode(rawValue: option("--mode") ?? "native"),
+              !arguments.isEmpty, arguments.allSatisfy({ !$0.hasPrefix("--") }) else { fail(usage) }
+        let runtime = try IndicTranscribeFlex(modelDirectory: URL(fileURLWithPath: path), useCachedDecoder: cached)
+        for path in arguments {
+            let transcript = try await runtime.transcribe(
+                file: URL(fileURLWithPath: path),
+                language: language == "auto" ? nil : language, mode: mode
+            )
+            print(json(["path": path, "text": transcript.text, "language": transcript.language], pretty: false))
+        }
     case "transcribe":
         let model = model(), ctc = flag("--ctc"), asJSON = flag("--json"), compute = computeUnits()
         let withAlternatives = flag("--alternatives")

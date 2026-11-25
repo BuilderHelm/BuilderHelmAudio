@@ -17,6 +17,12 @@ public enum ParakeetAudio {
         }
     }
 
+    /// Read at most this many converted samples without loading the rest of the file.
+    public static func read(_ url: URL, maximumSamples: Int) throws -> [Float] {
+        guard maximumSamples > 0 else { return [] }
+        return try autoreleasepool { try Reader(url).read(maximumSamples) }
+    }
+
     /// Fixed conversion blocks ensure file streaming and `read` use the same resampler sequence.
     final class Reader {
         private let file: AVAudioFile

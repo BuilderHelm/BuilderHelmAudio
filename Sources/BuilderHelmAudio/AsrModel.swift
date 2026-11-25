@@ -247,6 +247,53 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
         ],
         variant: "6bit")
 
+    /// Cadence Masubi: a multilingual FP16 fine-tune of Parakeet TDT V3.
+    /// Uses the same 25 languages and TDT runtime, with token and word timestamps.
+    public static let cadenceMasubiMultilingual = AsrModel(
+        id: "cadence-masubi-multilingual",
+        repository: "BuilderHelm/Cadence-Masubi-Multilingual-CoreML",
+        version: "1.0.0",
+        revision: "29640e2a8f075b250c352df8b6add73a8ba7ae8e",
+        architecture: .parakeetV3,
+        supportedLanguages: parakeetTdtV3.supportedLanguages,
+        capabilities: .parakeetV3Tdt, ctcConfiguration: nil,
+        files: [
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 581_731,
+                 sha256: "2df1e07c8498c045bf3e01cf8f4eb9181628037ffec414d80e39078ffbeb5d32"),
+            File(path: "Encoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 615_729_280,
+                 sha256: "654f958bb131f6e99bcd27ba2ce02a78e549285d7cc907edb736812dc4c6f14b"),
+            File(path: "Encoder.mlpackage/Manifest.json", size: 617,
+                 sha256: "229cf4fb1d80c98377fc655cf2d1ca6af74fd160b3e4cd192df4c8fd5396a52a"),
+            File(path: "EncoderTail.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 557_772,
+                 sha256: "5f0f0de748a62918370035c907636cf554b238a8ce02b013ac379d7ac56c67e2"),
+            File(path: "EncoderTail.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 607_061_824,
+                 sha256: "79deb1670d1a5bdbc0bb7cf2fc237efd9022e6b84324fb508790e4d75419ea81"),
+            File(path: "EncoderTail.mlpackage/Manifest.json", size: 617,
+                 sha256: "4a264e1c70836d313d39cb912bc5b4d5d6e847ea766c166d663a3d042da7d5df"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 4_647,
+                 sha256: "95b669c4eaa7500ae78a8f060dee3c0f0412370d3d61610acd7550ef84c88397"),
+            File(path: "Joint.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 12_642_764,
+                 sha256: "f42cc3e8b05299bd2093cc55f61ad6106d00bc7d864fe8da8d02f222b680b283"),
+            File(path: "Joint.mlpackage/Manifest.json", size: 617,
+                 sha256: "ce0429c78636233a41e3e0e122b402fda21f370a3a9f87f110faca071f84833c"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 12_045,
+                 sha256: "38c70bb852f8338b9113eef8c6338ee987561ddc7b2bea5723959929166c3e2a"),
+            File(path: "Predictor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 23_604_992,
+                 sha256: "91d96ac3f1f10068fdfe868d0362d5b28e79b1a2bf2a0fee89077f8640f6023a"),
+            File(path: "Predictor.mlpackage/Manifest.json", size: 617,
+                 sha256: "96f2ec9e5e5fa5f97361ab9d489887742173748b4c167c1222c2eefb5c2abd15"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/model.mlmodel", size: 37_760,
+                 sha256: "7a67f874be8af28a9a868415387d08df9df11762bedf270aa7c82d212312e964"),
+            File(path: "Preprocessor.mlpackage/Data/com.apple.CoreML/weights/weight.bin", size: 7_348_032,
+                 sha256: "c7b165bbc95ac8538b0e3dc28e4f7a770dfa31e1cc9f754cb9055c211d224b21"),
+            File(path: "Preprocessor.mlpackage/Manifest.json", size: 617,
+                 sha256: "ba1316c90f5445c311355003b6d755abcd514c166ee22c73a6e05e53d123aa82"),
+            File(path: "config.json", size: 2_917,
+                 sha256: "1260f437d2356dde8d0e1311a80bf2e74774e2c89f267ed176b4f812fbe7ad96"),
+            File(path: "vocab.json", size: 95_041,
+                 sha256: "6d23d30bfea120aaf0b911a3e2f66a72b011d0722554550b0bce821e1bd6409b"),
+        ])
+
     /// Locally managed v3 exports. Use `SpeechRecognizer(directory:model:)`.
     /// This descriptor has no remote repository and supports TDT text, token and word timestamps.
     public static let experimentalParakeetV3 = AsrModel(
@@ -360,7 +407,10 @@ public struct AsrModel: Sendable, Hashable, CustomStringConvertible {
         architecture: .parakeetUnifiedEn, supportedLanguages: ["en"],
         capabilities: .parakeetUnifiedRnnt, ctcConfiguration: nil, files: [])
 
-    public static let all: [AsrModel] = [.parakeetTdtCtc110M, .parakeetCtc110M, .parakeetTdtV3, .cadenceSaeEn, .parakeetUnifiedEn, .parakeetUnifiedEnInt8]
+    public static let all: [AsrModel] = [
+        .parakeetTdtCtc110M, .parakeetCtc110M, .parakeetTdtV3,
+        .cadenceSaeEn, .cadenceMasubiMultilingual, .parakeetUnifiedEn, .parakeetUnifiedEnInt8,
+    ]
     /// Descriptors for model folders you manage yourself, by id.
     public static let local: [AsrModel] = [.experimentalParakeetV3, .experimentalParakeetUnifiedEn]
 

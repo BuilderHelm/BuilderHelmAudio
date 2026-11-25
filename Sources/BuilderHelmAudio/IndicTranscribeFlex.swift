@@ -58,7 +58,18 @@ public actor IndicTranscribeFlex {
         }
         tokenizer = metadata
         frontend = try Self.load("frontend", from: modelDirectory, units: .cpuOnly)
-        encoder = try Self.load("encoder", from: modelDirectory, units: .cpuAndGPU)
+        let encoderUnits: MLComputeUnits
+        #if os(macOS)
+        // The macOS 27 GPU backend can abort on the encoder's dynamic reshape.
+        if #available(macOS 27, *) {
+            encoderUnits = .cpuOnly
+        } else {
+            encoderUnits = .cpuAndGPU
+        }
+        #else
+        encoderUnits = .cpuAndGPU
+        #endif
+        encoder = try Self.load("encoder", from: modelDirectory, units: encoderUnits)
         usesCachedDecoder = useCachedDecoder
         decoder = try Self.load(
             useCachedDecoder ? "decoder_cached" : "decoder", from: modelDirectory, units: .cpuAndGPU
